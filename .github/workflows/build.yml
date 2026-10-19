@@ -1,0 +1,43 @@
+name: Build plugin
+
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build
+        run: |
+          cmake -S . -B build -A x64
+          cmake --build build --config Release
+      - name: Package
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force out | Out-Null
+          Copy-Item build/Release/QMLogoRunner.dll out/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: QMLogoRunner-Windows
+          path: out/QMLogoRunner.dll
+
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build (Apple Silicon + Intel)
+        run: |
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+          cmake --build build --config Release
+          codesign --force --deep -s - build/QMLogoRunner.bundle
+          lipo -info build/QMLogoRunner.bundle/Contents/MacOS/QMLogoRunner
+      - name: Package
+        run: |
+          mkdir -p out
+          cd build && zip -r ../out/QMLogoRunner-mac.zip QMLogoRunner.bundle
+      - uses: actions/upload-artifact@v4
+        with:
+          name: QMLogoRunner-macOS
+          path: out/QMLogoRunner-mac.zip
