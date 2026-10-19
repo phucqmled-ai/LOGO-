@@ -57,6 +57,7 @@ public:
 		P_SLICE_MODE,
 		P_SLICE_SELECT,
 		P_SLICE_FILE,
+		P_SLICE_MARGIN,
 		P_COUNT
 	};
 
@@ -85,6 +86,7 @@ private:
 		float len;
 		bool clip;
 		float chainOff;
+		float inset;
 	};
 
 	void RebuildAtlas();

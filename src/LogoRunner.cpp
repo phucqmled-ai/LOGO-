@@ -24,7 +24,7 @@ static CFFGLPluginInfo PluginInfo(
 	2,                   // API major version number
 	1,                   // API minor version number
 	1,                   // Plugin major version number
-	1,                   // Plugin minor version number
+	2,                   // Plugin minor version number
 	FF_SOURCE,           // Plugin type
 	"Chay logo PNG va chu theo duong ngang, doc, tron, elip, vien chu nhat",
 	"QM LED" );
@@ -55,7 +55,7 @@ uniform vec2 res;
 uniform int pathCount;
 uniform vec4 pRect[ MAXP ];   // cx, cy, w, h (px, y up)
 uniform vec4 pInfo[ MAXP ];   // type, length, thickness, clip
-uniform vec4 pMotion[ MAXP ]; // extra gap, chain offset, scroll phase, -
+uniform vec4 pMotion[ MAXP ]; // extra gap, chain offset, scroll phase, clip inset
 uniform int flipSide;
 uniform int count;
 uniform float itemScale;
@@ -89,10 +89,10 @@ void main()
 		vec2 center = R.xy;
 		vec2 size   = R.zw;
 		vec2 d      = p - center;
-		if( I.w > 0.5 && ( abs( d.x ) > size.x * 0.5 || abs( d.y ) > size.y * 0.5 ) )
+		if( I.w > 0.5 && ( abs( d.x ) > size.x * 0.5 + M.w || abs( d.y ) > size.y * 0.5 + M.w ) )
 			continue;
 
-		float s = 0.0, n = 0.0;
+		float s = 0.0, n = 0.0, nb = -1e9;
 		bool along = true;
 		if( shape == 0 )
 		{
@@ -117,36 +117,56 @@ void main()
 		}
 		else
 		{
-			float W = max( size.x - thick, 1.0 );
-			float H = max( size.y - thick, 1.0 );
-			float hw = W * 0.5, hh = H * 0.5;
-			float ex = abs( d.x ) - hw;
-			float ey = abs( d.y ) - hh;
-			if( ey > ex )
+			float W  = max( size.x - thick, 1.0 );
+			float H  = max( size.y - thick, 1.0 );
+			float rc = min( thick * 0.5, min( W, H ) * 0.5 );
+			float a  = W * 0.5 - rc, b = H * 0.5 - rc;
+			float A  = 1.57079632679 * rc;// quarter arc length
+			vec2 q   = abs( d ) - vec2( a, b );
+			// square edges for band + border lines so they reach the slice corners
+			vec2 e = abs( d ) - vec2( W, H ) * 0.5;
+			nb = max( e.x, e.y ) / thick + 0.5;
+			if( q.x > 0.0 && q.y > 0.0 )
 			{
-				if( d.y > 0.0 ) { s = d.x + hw;                   n = ( d.y - hh ) / thick + 0.5; }
-				else            { s = W + H + ( hw - d.x );       n = ( -d.y - hh ) / thick + 0.5; }
+				vec2 cc = sign( d ) * vec2( a, b );
+				vec2 v  = d - cc;
+				float th = atan( v.y, v.x );
+				n = ( length( v ) - rc ) / thick + 0.5;
+				if( d.x > 0.0 && d.y > 0.0 )      s = 2.0 * a + ( 1.57079632679 - th ) * rc;
+				else if( d.x > 0.0 )              s = 2.0 * a + 2.0 * b + 2.0 * A + ( -th ) * rc;
+				else if( d.y < 0.0 )              s = 4.0 * a + 2.0 * b + 4.0 * A + ( -1.57079632679 - th ) * rc;
+				else                              s = 4.0 * a + 4.0 * b + 6.0 * A + ( th - 1.57079632679 ) * rc;
+			}
+			else if( q.y > q.x )
+			{
+				n = ( abs( d.y ) - H * 0.5 ) / thick + 0.5;
+				if( d.y > 0.0 ) s = d.x + a;
+				else            s = 2.0 * a + 2.0 * b + 4.0 * A + ( a - d.x );
 			}
 			else
 			{
-				if( d.x > 0.0 ) { s = W + ( hh - d.y );           n = ( d.x - hw ) / thick + 0.5; }
-				else            { s = 2.0 * W + H + ( d.y + hh ); n = ( -d.x - hw ) / thick + 0.5; }
+				n = ( abs( d.x ) - W * 0.5 ) / thick + 0.5;
+				if( d.x > 0.0 ) s = 2.0 * a + 2.0 * A + ( b - d.y );
+				else            s = 4.0 * a + 2.0 * b + 6.0 * A + ( d.y + b );
 			}
 		}
+		if( nb < -1e8 )
+			nb = n;
 		if( flipSide == 1 )
 		{
-			n = 1.0 - n;
-			s = L - s;
+			n  = 1.0 - n;
+			nb = 1.0 - nb;
+			s  = L - s;
 		}
 		if( !along )
 			continue;
 
 		vec4 c = vec4( 0.0 );
-		bool inBand = n >= 0.0 && n <= 1.0;
+		bool inBand = nb >= 0.0 && nb <= 1.0;
 		if( inBand )
 			c = vec4( 0.0, 0.0, 0.0, bandFill );
 
-		if( count > 0 && inBand )
+		if( count > 0 && n >= 0.0 && n <= 1.0 )
 		{
 			float gap = gapFactor * thick;
 			float cycle = 0.0;
@@ -185,7 +205,7 @@ void main()
 
 		if( borderColor.a > 0.0 )
 		{
-			float dpx  = min( abs( n ), abs( n - 1.0 ) ) * thick;
+			float dpx  = min( abs( nb ), abs( nb - 1.0 ) ) * thick;
 			float line = 1.0 - smoothstep( borderW * 0.5 - 0.75, borderW * 0.5 + 0.75, dpx );
 			float glow = glowR > 0.5 ? exp( -max( dpx - borderW * 0.5, 0.0 ) / glowR ) * 0.6 : 0.0;
 			float a    = clamp( max( line, glow ), 0.0, 1.0 ) * borderColor.a;
@@ -286,8 +306,10 @@ LogoRunner::LogoRunner()
 	SetParamElementInfo( P_SLICE_MODE, 3, "Noi lien cac slice", 3.0f );
 	SetParamInfo( P_SLICE_SELECT, "Slice", FF_TYPE_STANDARD, 0.0f );
 	SetFileParamInfo( P_SLICE_FILE, "Slice File", { "xml" }, "" );
+	SetParamInfo( P_SLICE_MARGIN, "Slice Margin", FF_TYPE_STANDARD, 0.2f );
+	values[ P_SLICE_MARGIN ] = 0.2f;
 
-	for( unsigned int i = P_SLICE_MODE; i <= P_SLICE_FILE; ++i )
+	for( unsigned int i = P_SLICE_MODE; i <= P_SLICE_MARGIN; ++i )
 		SetParamGroup( i, "Slices" );
 	for( unsigned int i = P_LOGO1; i <= P_TEXT_ALPHA; ++i )
 		SetParamGroup( i, "Content" );
@@ -710,7 +732,11 @@ float LogoRunner::PathLen( int type, float w, float h, float thick )
 		return PI_F * ( 3.0f * ( a + b ) - std::sqrt( ( 3.0f * a + b ) * ( a + 3.0f * b ) ) );
 	}
 	default:
-		return 2.0f * ( std::max( w - thick, 1.0f ) + std::max( h - thick, 1.0f ) );
+	{
+		float W  = std::max( w - thick, 1.0f ), H = std::max( h - thick, 1.0f );
+		float rc = std::min( thick * 0.5f, std::min( W, H ) * 0.5f );
+		return 2.0f * ( W + H ) - 8.0f * rc + 2.0f * PI_F * rc;
+	}
 	}
 }
 
@@ -906,6 +932,7 @@ void LogoRunner::BuildPaths( std::vector< PathDef >& out ) const
 		p.len      = PathLen( p.type, p.w, p.h, thick );
 		p.clip     = false;
 		p.chainOff = 0;
+		p.inset    = 0;
 		out.push_back( p );
 		return;
 	}
@@ -921,6 +948,8 @@ void LogoRunner::BuildPaths( std::vector< PathDef >& out ) const
 		float w = ( s.x1 - s.x0 ) * sx, h = ( s.y1 - s.y0 ) * sy;
 		chainThick = std::min( chainThick, std::min( w, h ) );
 	}
+	float borderPx = values[ P_BORDER ] > 0.5f ? std::max( 0.5f, values[ P_BORDER_WIDTH ] * 16.0f * ( rh / 1080.0f ) ) : 0.0f;
+	float inset    = borderPx * 0.5f + 1.0f + ( values[ P_SLICE_MARGIN ] - 0.2f ) * 100.0f * ( rh / 1080.0f );
 	float chain = 0.0f;
 	for( size_t i = 0; i < slices.size(); ++i )
 	{
@@ -933,6 +962,10 @@ void LogoRunner::BuildPaths( std::vector< PathDef >& out ) const
 		p.w    = ( s.x1 - s.x0 ) * sx;
 		p.h    = ( s.y1 - s.y0 ) * sy;
 		p.clip = true;
+		float in = std::min( inset, std::min( p.w, p.h ) * 0.5f - 2.0f );
+		p.inset = in;
+		p.w -= 2.0f * in;
+		p.h -= 2.0f * in;
 		float shortSide = std::min( p.w, p.h );
 		if( mode == 1 )
 		{
@@ -1026,7 +1059,7 @@ FFResult LogoRunner::ProcessOpenGL( ProcessOpenGLStruct* pGL )
 		motionU[ k * 4 + 0 ] = extra;
 		motionU[ k * 4 + 1 ] = p.chainOff;
 		motionU[ k * 4 + 2 ] = (float)phase[ pk ] + values[ P_OFFSET ] * cycle;
-		motionU[ k * 4 + 3 ] = 0.0f;
+		motionU[ k * 4 + 3 ] = p.inset;
 	}
 
 	float tr, tg, tb, br, bg, bb;
@@ -1170,6 +1203,9 @@ char* LogoRunner::GetParameterDisplay( unsigned int index )
 			snprintf( displayBuf, sizeof( displayBuf ), "%d: %s", sel, slices[ sel - 1 ].name.c_str() );
 		return displayBuf;
 	}
+	case P_SLICE_MARGIN:
+		snprintf( displayBuf, sizeof( displayBuf ), "%+d px", (int)std::lround( ( v - 0.2f ) * 100.0f * ( rh / 1080.0f ) ) );
+		return displayBuf;
 	case P_SPEED:
 	{
 		float sp = ( v - 0.5f ) * 2.0f;
