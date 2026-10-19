@@ -24,7 +24,7 @@ static CFFGLPluginInfo PluginInfo(
 	2,                   // API major version number
 	1,                   // API minor version number
 	1,                   // Plugin major version number
-	0,                   // Plugin minor version number
+	1,                   // Plugin minor version number
 	FF_SOURCE,           // Plugin type
 	"Chay logo PNG va chu theo duong ngang, doc, tron, elip, vien chu nhat",
 	"QM LED" );
@@ -47,24 +47,20 @@ void main()
 
 static const char fragmentShaderCode[] = R"(#version 410 core
 #define MAXI 16
+#define MAXP 16
 in vec2 uv;
 out vec4 fragColor;
 
 uniform vec2 res;
-uniform int shape;          // 0 ngang, 1 doc, 2 tron, 3 elip, 4 vien chu nhat
-uniform vec2 center;        // px
-uniform vec2 size;          // px (outer)
-uniform float thick;        // px
-uniform float pathLen;      // px
-uniform int closedPath;
+uniform int pathCount;
+uniform vec4 pRect[ MAXP ];   // cx, cy, w, h (px, y up)
+uniform vec4 pInfo[ MAXP ];   // type, length, thickness, clip
+uniform vec4 pMotion[ MAXP ]; // extra gap, chain offset, scroll phase, -
 uniform int flipSide;
-uniform float scrollPos;    // px
-uniform float cycleLen;     // px
 uniform int count;
 uniform float itemScale;
-uniform float starts[ MAXI ];
-uniform float cells[ MAXI ];
-uniform float lens[ MAXI ];
+uniform float gapFactor;
+uniform float aspects[ MAXI ];
 uniform vec4 rects[ MAXI ];
 uniform int isText[ MAXI ];
 uniform sampler2D atlas;
@@ -74,112 +70,130 @@ uniform float borderW;      // px
 uniform float glowR;        // px
 uniform float bandFill;
 
-// premultiplied "over"
 vec4 over( vec4 top, vec4 bottom ) { return top + bottom * ( 1.0 - top.a ); }
 
 void main()
 {
-	vec2 p = uv * res;
-	vec2 d = p - center;
-	float s = 0.0;   // distance along path (px)
-	float n = 0.0;   // 0..1 across band, 1 = top of item
-	bool along = true;
+	vec2 p   = uv * res;
+	vec4 col = vec4( 0.0 );
 
-	if( shape == 0 )
+	for( int k = 0; k < MAXP; ++k )
 	{
-		s = p.x - ( center.x - size.x * 0.5 );
-		n = d.y / thick + 0.5;
-		along = s >= 0.0 && s <= pathLen;
-	}
-	else if( shape == 1 )
-	{
-		s = ( center.y + size.y * 0.5 ) - p.y;
-		n = d.x / thick + 0.5;
-		along = s >= 0.0 && s <= pathLen;
-	}
-	else if( shape == 2 || shape == 3 )
-	{
-		vec2 r = shape == 2 ? vec2( size.y * 0.5 - thick * 0.5 ) : max( size * 0.5 - thick * 0.5, vec2( 1.0 ) );
-		r = max( r, vec2( 1.0 ) );
-		float t = atan( d.y / r.y, d.x / r.x );
-		vec2 m = vec2( r.x * cos( t ), r.y * sin( t ) );
-		float dist = length( d ) - length( m );
-		n = dist / thick + 0.5;
-		float u = fract( 0.25 - t / 6.28318530718 );// 0 at top, clockwise
-		s = u * pathLen;
-	}
-	else
-	{
-		float W = max( size.x - thick, 1.0 );
-		float H = max( size.y - thick, 1.0 );
-		float hw = W * 0.5, hh = H * 0.5;
-		float ex = abs( d.x ) - hw;
-		float ey = abs( d.y ) - hh;
-		if( ey > ex )
+		if( k >= pathCount ) break;
+		vec4 R = pRect[ k ];
+		vec4 I = pInfo[ k ];
+		vec4 M = pMotion[ k ];
+		int shape   = int( I.x + 0.5 );
+		float L     = I.y;
+		float thick = I.z;
+		vec2 center = R.xy;
+		vec2 size   = R.zw;
+		vec2 d      = p - center;
+		if( I.w > 0.5 && ( abs( d.x ) > size.x * 0.5 || abs( d.y ) > size.y * 0.5 ) )
+			continue;
+
+		float s = 0.0, n = 0.0;
+		bool along = true;
+		if( shape == 0 )
 		{
-			if( d.y > 0.0 ) { s = d.x + hw;                 n = ( d.y - hh ) / thick + 0.5; }
-			else            { s = W + H + ( hw - d.x );     n = ( -d.y - hh ) / thick + 0.5; }
+			s = p.x - ( center.x - size.x * 0.5 );
+			n = d.y / thick + 0.5;
+			along = s >= 0.0 && s <= L;
+		}
+		else if( shape == 1 )
+		{
+			s = ( center.y + size.y * 0.5 ) - p.y;
+			n = d.x / thick + 0.5;
+			along = s >= 0.0 && s <= L;
+		}
+		else if( shape == 2 || shape == 3 )
+		{
+			vec2 r = shape == 2 ? vec2( size.y * 0.5 - thick * 0.5 ) : size * 0.5 - thick * 0.5;
+			r = max( r, vec2( 1.0 ) );
+			float t = atan( d.y / r.y, d.x / r.x );
+			vec2 m = vec2( r.x * cos( t ), r.y * sin( t ) );
+			n = ( length( d ) - length( m ) ) / thick + 0.5;
+			s = fract( 0.25 - t / 6.28318530718 ) * L;
 		}
 		else
 		{
-			if( d.x > 0.0 ) { s = W + ( hh - d.y );         n = ( d.x - hw ) / thick + 0.5; }
-			else            { s = 2.0 * W + H + ( d.y + hh ); n = ( -d.x - hw ) / thick + 0.5; }
-		}
-	}
-
-	if( flipSide == 1 )
-	{
-		n = 1.0 - n;
-		s = pathLen - s;
-	}
-
-	vec4 col = vec4( 0.0 );
-	if( !along )
-	{
-		fragColor = col;
-		return;
-	}
-
-	// band background
-	if( n >= 0.0 && n <= 1.0 )
-		col = vec4( 0.0, 0.0, 0.0, bandFill );
-
-	// items
-	if( count > 0 && cycleLen > 0.0 && n >= 0.0 && n <= 1.0 )
-	{
-		float x = mod( s + scrollPos, cycleLen );
-		for( int i = 0; i < MAXI; ++i )
-		{
-			if( i >= count ) break;
-			if( x >= starts[ i ] && x < starts[ i ] + cells[ i ] )
+			float W = max( size.x - thick, 1.0 );
+			float H = max( size.y - thick, 1.0 );
+			float hw = W * 0.5, hh = H * 0.5;
+			float ex = abs( d.x ) - hw;
+			float ey = abs( d.y ) - hh;
+			if( ey > ex )
 			{
-				float xi = x - starts[ i ];
-				float u  = ( xi - ( cells[ i ] - lens[ i ] ) * 0.5 ) / lens[ i ];
-				float v  = ( n - 0.5 ) / itemScale + 0.5;
-				if( u >= 0.0 && u <= 1.0 && v >= 0.0 && v <= 1.0 )
-				{
-					vec4 r  = rects[ i ];
-					vec4 tx = texture( atlas, r.xy + vec2( u, v ) * r.zw );
-					if( isText[ i ] == 1 )
-						tx = vec4( textColor.rgb, 1.0 ) * tx.a * textColor.a;
-					col = over( tx, col );
-				}
-				break;
+				if( d.y > 0.0 ) { s = d.x + hw;                   n = ( d.y - hh ) / thick + 0.5; }
+				else            { s = W + H + ( hw - d.x );       n = ( -d.y - hh ) / thick + 0.5; }
+			}
+			else
+			{
+				if( d.x > 0.0 ) { s = W + ( hh - d.y );           n = ( d.x - hw ) / thick + 0.5; }
+				else            { s = 2.0 * W + H + ( d.y + hh ); n = ( -d.x - hw ) / thick + 0.5; }
 			}
 		}
+		if( flipSide == 1 )
+		{
+			n = 1.0 - n;
+			s = L - s;
+		}
+		if( !along )
+			continue;
+
+		vec4 c = vec4( 0.0 );
+		bool inBand = n >= 0.0 && n <= 1.0;
+		if( inBand )
+			c = vec4( 0.0, 0.0, 0.0, bandFill );
+
+		if( count > 0 && inBand )
+		{
+			float gap = gapFactor * thick;
+			float cycle = 0.0;
+			for( int i = 0; i < MAXI; ++i )
+			{
+				if( i >= count ) break;
+				cycle += thick * itemScale * aspects[ i ] + gap + M.x;
+			}
+			if( cycle > 0.0 )
+			{
+				float x = mod( s + M.y + M.z, cycle );
+				float acc = 0.0;
+				for( int i = 0; i < MAXI; ++i )
+				{
+					if( i >= count ) break;
+					float len  = max( 1.0, thick * itemScale * aspects[ i ] );
+					float cell = max( len, len + gap + M.x );
+					if( x >= acc && x < acc + cell )
+					{
+						float u = ( x - acc - ( cell - len ) * 0.5 ) / len;
+						float v = ( n - 0.5 ) / itemScale + 0.5;
+						if( u >= 0.0 && u <= 1.0 && v >= 0.0 && v <= 1.0 )
+						{
+							vec4 r  = rects[ i ];
+							vec4 tx = texture( atlas, r.xy + vec2( u, v ) * r.zw );
+							if( isText[ i ] == 1 )
+								tx = vec4( textColor.rgb, 1.0 ) * tx.a * textColor.a;
+							c = over( tx, c );
+						}
+						break;
+					}
+					acc += cell;
+				}
+			}
+		}
+
+		if( borderColor.a > 0.0 )
+		{
+			float dpx  = min( abs( n ), abs( n - 1.0 ) ) * thick;
+			float line = 1.0 - smoothstep( borderW * 0.5 - 0.75, borderW * 0.5 + 0.75, dpx );
+			float glow = glowR > 0.5 ? exp( -max( dpx - borderW * 0.5, 0.0 ) / glowR ) * 0.6 : 0.0;
+			float a    = clamp( max( line, glow ), 0.0, 1.0 ) * borderColor.a;
+			c = over( vec4( borderColor.rgb * a, a ), c );
+		}
+		col = over( c, col );
 	}
 
-	// border lines + glow at both band edges
-	if( borderColor.a > 0.0 )
-	{
-		float dpx = min( abs( n ) , abs( n - 1.0 ) ) * thick;
-		float line = 1.0 - smoothstep( borderW * 0.5 - 0.75, borderW * 0.5 + 0.75, dpx );
-		float glow = glowR > 0.5 ? exp( -max( dpx - borderW * 0.5, 0.0 ) / glowR ) * 0.6 : 0.0;
-		float a = clamp( max( line, glow ), 0.0, 1.0 ) * borderColor.a;
-		col = over( vec4( borderColor.rgb * a, a ), col );
-	}
-
-	// output straight (non premultiplied) alpha
 	if( col.a > 0.0001 )
 		col.rgb /= col.a;
 	fragColor = col;
@@ -265,6 +279,16 @@ LogoRunner::LogoRunner()
 	values[ P_BORDER_WIDTH ] = 0.25f;
 	values[ P_GLOW ]         = 0.3f;
 
+	SetOptionParamInfo( P_SLICE_MODE, "Slice Mode", 4, 0.0f );
+	SetParamElementInfo( P_SLICE_MODE, 0, "Tat - dung Shape", 0.0f );
+	SetParamElementInfo( P_SLICE_MODE, 1, "Vien quanh tung slice", 1.0f );
+	SetParamElementInfo( P_SLICE_MODE, 2, "Dai chay tung slice", 2.0f );
+	SetParamElementInfo( P_SLICE_MODE, 3, "Noi lien cac slice", 3.0f );
+	SetParamInfo( P_SLICE_SELECT, "Slice", FF_TYPE_STANDARD, 0.0f );
+	SetFileParamInfo( P_SLICE_FILE, "Slice File", { "xml" }, "" );
+
+	for( unsigned int i = P_SLICE_MODE; i <= P_SLICE_FILE; ++i )
+		SetParamGroup( i, "Slices" );
 	for( unsigned int i = P_LOGO1; i <= P_TEXT_ALPHA; ++i )
 		SetParamGroup( i, "Content" );
 	for( unsigned int i = P_SHAPE; i <= P_FLIP; ++i )
@@ -669,25 +693,16 @@ void LogoRunner::RebuildAtlas()
 
 // --------------------------------------------------------------------------- render
 
-float LogoRunner::PathLength() const
+float LogoRunner::PathLen( int type, float w, float h, float thick )
 {
-	float rw    = (float)currentViewport.width;
-	float rh    = (float)currentViewport.height;
-	float w     = values[ P_WIDTH ] * rw;
-	float h     = values[ P_HEIGHT ] * rh;
-	float thick = std::max( 2.0f, values[ P_THICK ] * 0.5f * std::min( rw, rh ) );
-	int shape   = (int)std::lround( values[ P_SHAPE ] );
-	switch( shape )
+	switch( type )
 	{
 	case 0:
 		return std::max( w, 1.0f );
 	case 1:
 		return std::max( h, 1.0f );
 	case 2:
-	{
-		float r = std::max( h * 0.5f - thick * 0.5f, 1.0f );
-		return 2.0f * PI_F * r;
-	}
+		return 2.0f * PI_F * std::max( h * 0.5f - thick * 0.5f, 1.0f );
 	case 3:
 	{
 		float a = std::max( w * 0.5f - thick * 0.5f, 1.0f );
@@ -696,6 +711,243 @@ float LogoRunner::PathLength() const
 	}
 	default:
 		return 2.0f * ( std::max( w - thick, 1.0f ) + std::max( h - thick, 1.0f ) );
+	}
+}
+
+// ------------------------------------------------------------------ slices
+
+static long long FileStamp( const std::string& path )
+{
+	std::error_code ec;
+	auto p = std::filesystem::u8path( path );
+	auto t = std::filesystem::last_write_time( p, ec );
+	if( ec )
+		return -1;
+	auto sz = std::filesystem::file_size( p, ec );
+	return (long long)t.time_since_epoch().count() ^ ( ec ? 0 : (long long)sz << 1 );
+}
+
+std::string LogoRunner::DefaultSliceFile() const
+{
+	std::vector< std::string > cands;
+#if defined( _WIN32 )
+	const char* up = getenv( "USERPROFILE" );
+	if( up )
+	{
+		std::string u = up;
+		cands.push_back( u + "\\Documents\\Resolume Arena\\Preferences\\AdvancedOutput.xml" );
+		cands.push_back( u + "\\OneDrive\\Documents\\Resolume Arena\\Preferences\\AdvancedOutput.xml" );
+		cands.push_back( u + "\\OneDrive\\Tai lieu\\Resolume Arena\\Preferences\\AdvancedOutput.xml" );
+	}
+#else
+	const char* home = getenv( "HOME" );
+	if( home )
+	{
+		std::string h = home;
+		cands.push_back( h + "/Documents/Resolume Arena/Preferences/AdvancedOutput.xml" );
+		cands.push_back( h + "/Documents/Resolume Avenue/Preferences/AdvancedOutput.xml" );
+	}
+#endif
+	for( const std::string& c : cands )
+		if( FileStamp( c ) != -1 )
+			return c;
+	return cands.empty() ? std::string() : cands[ 0 ];
+}
+
+static std::string Attr( const std::string& tag, const std::string& name )
+{
+	std::string key = " " + name + "=\"";
+	size_t p        = tag.find( key );
+	if( p == std::string::npos )
+		return "";
+	p += key.size();
+	size_t e = tag.find( '"', p );
+	return e == std::string::npos ? "" : tag.substr( p, e - p );
+}
+
+static std::string XmlUnescape( std::string s )
+{
+	const char* from[] = { "&amp;", "&lt;", "&gt;", "&quot;", "&apos;" };
+	const char* to[]   = { "&", "<", ">", "\"", "'" };
+	for( int i = 0; i < 5; ++i )
+	{
+		size_t p = 0;
+		while( ( p = s.find( from[ i ], p ) ) != std::string::npos )
+		{
+			s.replace( p, strlen( from[ i ] ), to[ i ] );
+			p += 1;
+		}
+	}
+	return s;
+}
+
+bool LogoRunner::LoadSlices( const std::string& path )
+{
+	std::ifstream f( std::filesystem::u8path( path ), std::ios::binary );
+	if( !f )
+		return false;
+	std::string xml( ( std::istreambuf_iterator< char >( f ) ), std::istreambuf_iterator< char >() );
+
+	std::vector< SliceRect > found;
+	size_t cs = xml.find( "<CurrentCompositionTextureSize" );
+	if( cs != std::string::npos )
+	{
+		std::string tag = xml.substr( cs, xml.find( '>', cs ) - cs );
+		float w = (float)atof( Attr( tag, "width" ).c_str() );
+		float h = (float)atof( Attr( tag, "height" ).c_str() );
+		if( w > 0 && h > 0 )
+			compW = w, compH = h;
+	}
+
+	const char* kinds[] = { "Slice", "Polygon" };
+	for( const char* kind : kinds )
+	{
+		std::string open  = std::string( "<" ) + kind + " ";
+		std::string close = std::string( "</" ) + kind + ">";
+		size_t pos        = 0;
+		while( ( pos = xml.find( open, pos ) ) != std::string::npos )
+		{
+			size_t end = xml.find( close, pos );
+			if( end == std::string::npos )
+				break;
+			std::string block = xml.substr( pos, end - pos );
+			pos               = end;
+
+			SliceRect r;
+			r.name    = kind;
+			size_t np = block.find( "<Param name=\"Name\"" );
+			if( np != std::string::npos )
+				r.name = XmlUnescape( Attr( block.substr( np, block.find( '>', np ) - np ), "value" ) );
+
+			size_t ir = block.find( "<InputRect" );
+			if( ir == std::string::npos )
+				ir = block.find( "<InputContour" );
+			if( ir == std::string::npos )
+				continue;
+			size_t irEnd = block.find( "</Input", ir );
+			std::string rectBlock = block.substr( ir, irEnd == std::string::npos ? std::string::npos : irEnd - ir );
+			float x0 = 1e9f, y0 = 1e9f, x1 = -1e9f, y1 = -1e9f;
+			size_t vp = 0;
+			int nv    = 0;
+			while( ( vp = rectBlock.find( "<v ", vp ) ) != std::string::npos )
+			{
+				std::string vt = rectBlock.substr( vp, rectBlock.find( '>', vp ) - vp );
+				float x        = (float)atof( Attr( vt, "x" ).c_str() );
+				float y        = (float)atof( Attr( vt, "y" ).c_str() );
+				x0 = std::min( x0, x ), x1 = std::max( x1, x );
+				y0 = std::min( y0, y ), y1 = std::max( y1, y );
+				++nv;
+				vp += 3;
+			}
+			if( nv < 2 || x1 - x0 < 2 || y1 - y0 < 2 )
+				continue;
+			r.x0 = x0, r.y0 = y0, r.x1 = x1, r.y1 = y1;
+			bool dup = false;
+			for( const SliceRect& o : found )
+				if( std::fabs( o.x0 - r.x0 ) < 1 && std::fabs( o.y0 - r.y0 ) < 1 && std::fabs( o.x1 - r.x1 ) < 1 && std::fabs( o.y1 - r.y1 ) < 1 )
+					dup = true;
+			if( !dup )
+				found.push_back( r );
+		}
+	}
+
+	// order: left -> right, then top -> bottom
+	float tol = compW * 0.03f;
+	std::stable_sort( found.begin(), found.end(), [ tol ]( const SliceRect& a, const SliceRect& b ) {
+		float ax = ( a.x0 + a.x1 ) * 0.5f, bx = ( b.x0 + b.x1 ) * 0.5f;
+		if( std::fabs( ax - bx ) > tol )
+			return ax < bx;
+		return a.y0 < b.y0;
+	} );
+	if( found.size() > (size_t)MAX_PATHS )
+		found.resize( MAX_PATHS );
+	slices = found;
+	return true;
+}
+
+void LogoRunner::CheckSliceFile()
+{
+	auto now = std::chrono::steady_clock::now();
+	if( sliceCheckedOnce && std::chrono::duration< float >( now - lastSliceCheck ).count() < 1.0f )
+		return;
+	lastSliceCheck   = now;
+	sliceCheckedOnce = true;
+
+	std::string path = sliceFile.empty() ? DefaultSliceFile() : sliceFile;
+	long long stamp  = FileStamp( path );
+	if( path == loadedSliceFile && stamp == sliceFileStamp )
+		return;
+	loadedSliceFile = path;
+	sliceFileStamp  = stamp;
+	if( stamp == -1 || !LoadSlices( path ) )
+	{
+		slices.clear();
+		FFGLLog::LogToHost( ( "QM Logo Runner: cannot read slices from " + path ).c_str() );
+	}
+}
+
+void LogoRunner::BuildPaths( std::vector< PathDef >& out ) const
+{
+	out.clear();
+	float rw    = (float)currentViewport.width;
+	float rh    = (float)currentViewport.height;
+	float thick = std::max( 2.0f, values[ P_THICK ] * 0.5f * std::min( rw, rh ) );
+	int mode    = (int)std::lround( values[ P_SLICE_MODE ] );
+
+	if( mode == 0 )
+	{
+		PathDef p;
+		p.type     = (int)std::lround( values[ P_SHAPE ] );
+		p.cx       = values[ P_POS_X ] * rw;
+		p.cy       = ( 1.0f - values[ P_POS_Y ] ) * rh;
+		p.w        = values[ P_WIDTH ] * rw;
+		p.h        = values[ P_HEIGHT ] * rh;
+		p.thick    = thick;
+		p.len      = PathLen( p.type, p.w, p.h, thick );
+		p.clip     = false;
+		p.chainOff = 0;
+		out.push_back( p );
+		return;
+	}
+
+	int sel = (int)std::lround( values[ P_SLICE_SELECT ] * slices.size() );
+	float sx = rw / compW, sy = rh / compH;
+	float chainThick = thick;
+	for( size_t i = 0; i < slices.size(); ++i )
+	{
+		if( sel > 0 && (int)i != sel - 1 )
+			continue;
+		const SliceRect& s = slices[ i ];
+		float w = ( s.x1 - s.x0 ) * sx, h = ( s.y1 - s.y0 ) * sy;
+		chainThick = std::min( chainThick, std::min( w, h ) );
+	}
+	float chain = 0.0f;
+	for( size_t i = 0; i < slices.size(); ++i )
+	{
+		if( sel > 0 && (int)i != sel - 1 )
+			continue;
+		const SliceRect& s = slices[ i ];
+		PathDef p;
+		p.cx   = ( s.x0 + s.x1 ) * 0.5f * sx;
+		p.cy   = rh - ( s.y0 + s.y1 ) * 0.5f * sy;
+		p.w    = ( s.x1 - s.x0 ) * sx;
+		p.h    = ( s.y1 - s.y0 ) * sy;
+		p.clip = true;
+		float shortSide = std::min( p.w, p.h );
+		if( mode == 1 )
+		{
+			p.type  = 4;
+			p.thick = std::max( 2.0f, std::min( thick, shortSide * 0.5f ) );
+		}
+		else
+		{
+			p.type  = p.w >= p.h ? 0 : 1;
+			p.thick = mode == 3 ? chainThick : std::max( 2.0f, std::min( thick, shortSide ) );
+		}
+		p.len      = PathLen( p.type, p.w, p.h, p.thick );
+		p.chainOff = mode == 3 ? chain : 0.0f;
+		chain += p.len;
+		out.push_back( p );
 	}
 }
 
@@ -710,6 +962,8 @@ FFResult LogoRunner::ProcessOpenGL( ProcessOpenGLStruct* pGL )
 {
 	if( contentDirty )
 		RebuildAtlas();
+	if( std::lround( values[ P_SLICE_MODE ] ) != 0 )
+		CheckSliceFile();
 
 	auto now = std::chrono::steady_clock::now();
 	float dt = 0.0f;
@@ -721,51 +975,58 @@ FFResult LogoRunner::ProcessOpenGL( ProcessOpenGLStruct* pGL )
 
 	float rw    = (float)currentViewport.width;
 	float rh    = (float)currentViewport.height;
-	int shape   = (int)std::lround( values[ P_SHAPE ] );
-	float thick = std::max( 2.0f, values[ P_THICK ] * 0.5f * std::min( rw, rh ) );
 	float scale = 0.1f + 0.9f * values[ P_ITEM_SIZE ];
-	float gapPx = values[ P_GAP ] * thick * 2.0f;
-	float L     = PathLength();
-	bool closed = shape >= 2;
+	float gapF  = values[ P_GAP ] * 2.0f;
+	int count   = (int)itemAspect.size();
+	int mode    = (int)std::lround( values[ P_SLICE_MODE ] );
 
-	int count = (int)itemAspect.size();
-	float lens[ MAX_ITEMS ], cells[ MAX_ITEMS ], starts[ MAX_ITEMS ];
-	float sum = 0.0f;
-	for( int i = 0; i < count; ++i )
-	{
-		lens[ i ] = std::max( 1.0f, thick * scale * itemAspect[ i ] );
-		sum += lens[ i ] + gapPx;
-	}
-	float cycle = sum, extraPer = 0.0f;
-	if( closed && count > 0 )
-	{
-		float rep = std::max( 1.0f, std::round( L / sum ) );
-		cycle     = L / rep;
-		extraPer  = ( cycle - sum ) / count;
-		if( lens[ 0 ] + gapPx + extraPer < 1.0f )
-			extraPer = 0.0f, cycle = sum;
-	}
-	float acc = 0.0f;
-	for( int i = 0; i < count; ++i )
-	{
-		starts[ i ] = acc;
-		cells[ i ]  = std::max( lens[ i ], lens[ i ] + gapPx + extraPer );
-		acc += cells[ i ];
-	}
-	if( count > 0 )
-		cycle = acc;
+	std::vector< PathDef > paths;
+	BuildPaths( paths );
+	int np = (int)paths.size();
 
-	float sp = ( values[ P_SPEED ] - 0.5f ) * 2.0f;
+	float sp       = ( values[ P_SPEED ] - 0.5f ) * 2.0f;
 	float pxPerSec = sp * std::fabs( sp ) * 600.0f * ( rh / 1080.0f );
-	scroll += pxPerSec * dt;
-	if( cycle > 0.0f )
-		scroll = std::fmod( scroll, (double)cycle );
-	float scrollPos = (float)scroll + values[ P_OFFSET ] * cycle;
-	if( cycle > 0.0f )
+
+	float rectU[ MAX_PATHS * 4 ], infoU[ MAX_PATHS * 4 ], motionU[ MAX_PATHS * 4 ];
+	for( int k = 0; k < np; ++k )
 	{
-		scrollPos = std::fmod( scrollPos, cycle );
-		if( scrollPos < 0.0f )
-			scrollPos += cycle;
+		const PathDef& p = paths[ k ];
+		float base       = 0.0f;
+		for( int i = 0; i < count; ++i )
+			base += std::max( 1.0f, p.thick * scale * itemAspect[ i ] ) + gapF * p.thick;
+		float extra   = 0.0f;
+		bool closed   = p.type >= 2;
+		if( closed && count > 0 && base > 0 && mode != 3 )
+		{
+			float rep = std::max( 1.0f, std::round( p.len / base ) );
+			extra     = ( p.len / rep - base ) / count;
+			if( base + extra * count < 1.0f )
+				extra = 0.0f;
+		}
+		float cycle = base + extra * count;
+		int pk      = mode == 3 ? 0 : k;// chain mode: one shared phase
+		if( mode != 3 || k == 0 )
+		{
+			phase[ pk ] += pxPerSec * dt;
+			if( cycle > 0.0f )
+			{
+				phase[ pk ] = std::fmod( phase[ pk ], (double)cycle );
+				if( phase[ pk ] < 0 )
+					phase[ pk ] += cycle;
+			}
+		}
+		rectU[ k * 4 + 0 ]   = p.cx;
+		rectU[ k * 4 + 1 ]   = p.cy;
+		rectU[ k * 4 + 2 ]   = p.w;
+		rectU[ k * 4 + 3 ]   = p.h;
+		infoU[ k * 4 + 0 ]   = (float)p.type;
+		infoU[ k * 4 + 1 ]   = p.len;
+		infoU[ k * 4 + 2 ]   = p.thick;
+		infoU[ k * 4 + 3 ]   = p.clip ? 1.0f : 0.0f;
+		motionU[ k * 4 + 0 ] = extra;
+		motionU[ k * 4 + 1 ] = p.chainOff;
+		motionU[ k * 4 + 2 ] = (float)phase[ pk ] + values[ P_OFFSET ] * cycle;
+		motionU[ k * 4 + 3 ] = 0.0f;
 	}
 
 	float tr, tg, tb, br, bg, bb;
@@ -777,17 +1038,17 @@ FFResult LogoRunner::ProcessOpenGL( ProcessOpenGLStruct* pGL )
 	ScopedShaderBinding shaderBinding( shader.GetGLID() );
 	GLuint prog = shader.GetGLID();
 	shader.Set( "res", rw, rh );
-	shader.Set( "shape", shape );
-	shader.Set( "center", values[ P_POS_X ] * rw, ( 1.0f - values[ P_POS_Y ] ) * rh );
-	shader.Set( "size", values[ P_WIDTH ] * rw, values[ P_HEIGHT ] * rh );
-	shader.Set( "thick", thick );
-	shader.Set( "pathLen", L );
-	shader.Set( "closedPath", closed ? 1 : 0 );
+	shader.Set( "pathCount", np );
+	if( np > 0 )
+	{
+		glUniform4fv( glGetUniformLocation( prog, "pRect" ), np, rectU );
+		glUniform4fv( glGetUniformLocation( prog, "pInfo" ), np, infoU );
+		glUniform4fv( glGetUniformLocation( prog, "pMotion" ), np, motionU );
+	}
 	shader.Set( "flipSide", values[ P_FLIP ] > 0.5f ? 1 : 0 );
-	shader.Set( "scrollPos", scrollPos );
-	shader.Set( "cycleLen", cycle );
 	shader.Set( "count", count );
 	shader.Set( "itemScale", scale );
+	shader.Set( "gapFactor", gapF );
 	shader.Set( "textColor", tr, tg, tb, values[ P_TEXT_ALPHA ] );
 	shader.Set( "borderColor", br, bg, bb, borderA );
 	shader.Set( "borderW", std::max( 0.5f, values[ P_BORDER_WIDTH ] * 16.0f * k ) );
@@ -795,9 +1056,7 @@ FFResult LogoRunner::ProcessOpenGL( ProcessOpenGLStruct* pGL )
 	shader.Set( "bandFill", values[ P_BAND_FILL ] );
 	if( count > 0 )
 	{
-		glUniform1fv( glGetUniformLocation( prog, "starts" ), count, starts );
-		glUniform1fv( glGetUniformLocation( prog, "cells" ), count, cells );
-		glUniform1fv( glGetUniformLocation( prog, "lens" ), count, lens );
+		glUniform1fv( glGetUniformLocation( prog, "aspects" ), count, itemAspect.data() );
 		glUniform4fv( glGetUniformLocation( prog, "rects" ), count, itemRect.data() );
 		glUniform1iv( glGetUniformLocation( prog, "isText" ), count, itemIsText.data() );
 	}
@@ -808,6 +1067,7 @@ FFResult LogoRunner::ProcessOpenGL( ProcessOpenGLStruct* pGL )
 	quad.Draw();
 	return FF_SUCCESS;
 }
+
 
 // --------------------------------------------------------------------------- params
 
@@ -850,6 +1110,10 @@ FFResult LogoRunner::SetTextParameter( unsigned int index, const char* value )
 			contentDirty = true;
 		fontPath = v;
 		return FF_SUCCESS;
+	case P_SLICE_FILE:
+		sliceFile        = v;
+		sliceCheckedOnce = false;
+		return FF_SUCCESS;
 	}
 	return FF_FAIL;
 }
@@ -866,6 +1130,8 @@ char* LogoRunner::GetTextParameter( unsigned int index )
 		return const_cast< char* >( text.c_str() );
 	case P_FONT:
 		return const_cast< char* >( fontPath.c_str() );
+	case P_SLICE_FILE:
+		return const_cast< char* >( sliceFile.c_str() );
 	}
 	return (char*)FF_FAIL;
 }
@@ -890,6 +1156,20 @@ char* LogoRunner::GetParameterDisplay( unsigned int index )
 	case P_THICK:
 		snprintf( displayBuf, sizeof( displayBuf ), "%d px", (int)std::lround( std::max( 2.0f, v * 0.5f * std::min( rw, rh ) ) ) );
 		return displayBuf;
+	case P_SLICE_SELECT:
+	{
+		if( slices.empty() )
+		{
+			snprintf( displayBuf, sizeof( displayBuf ), "Tat ca (chua doc slice)" );
+			return displayBuf;
+		}
+		int sel = (int)std::lround( v * slices.size() );
+		if( sel <= 0 )
+			snprintf( displayBuf, sizeof( displayBuf ), "Tat ca (%d slice)", (int)slices.size() );
+		else
+			snprintf( displayBuf, sizeof( displayBuf ), "%d: %s", sel, slices[ sel - 1 ].name.c_str() );
+		return displayBuf;
+	}
 	case P_SPEED:
 	{
 		float sp = ( v - 0.5f ) * 2.0f;

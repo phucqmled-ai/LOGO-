@@ -54,10 +54,14 @@ public:
 		P_BORDER_WIDTH,
 		P_GLOW,
 		P_BAND_FILL,
+		P_SLICE_MODE,
+		P_SLICE_SELECT,
+		P_SLICE_FILE,
 		P_COUNT
 	};
 
 	static const int MAX_ITEMS = 16;
+	static const int MAX_PATHS = 16;
 
 private:
 	struct Item
@@ -67,11 +71,31 @@ private:
 		bool isText = false;
 	};
 
+	struct SliceRect
+	{
+		std::string name;
+		float x0, y0, x1, y1;// composition pixels, top-left origin
+	};
+	struct PathDef
+	{
+		int type;       // 0 h, 1 v, 2 circle, 3 ellipse, 4 rect border
+		float cx, cy;   // GL pixels (y up)
+		float w, h;
+		float thick;
+		float len;
+		bool clip;
+		float chainOff;
+	};
+
 	void RebuildAtlas();
+	void CheckSliceFile();
+	bool LoadSlices( const std::string& path );
+	std::string DefaultSliceFile() const;
+	void BuildPaths( std::vector< PathDef >& out ) const;
+	static float PathLen( int type, float w, float h, float thick );
 	bool LoadLogo( const std::string& path, Item& out );
 	bool RenderText( const std::string& text, Item& out );
 	bool LoadFont();
-	float PathLength() const;
 
 	float values[ P_COUNT ];
 	std::string logoPath[ 3 ];
@@ -89,6 +113,15 @@ private:
 	ffglex::FFGLShader shader;
 	ffglex::FFGLScreenQuad quad;
 
+	std::string sliceFile;          // user chosen, empty = auto
+	std::string loadedSliceFile;
+	long long sliceFileStamp = -1;
+	std::vector< SliceRect > slices;// sorted left->right, top->bottom
+	float compW = 1920, compH = 1080;
+	std::chrono::steady_clock::time_point lastSliceCheck;
+	bool sliceCheckedOnce = false;
+
+	double phase[ MAX_PATHS ] = {};
 	double scroll = 0.0;
 	std::chrono::steady_clock::time_point lastTime;
 	bool hasLastTime = false;
