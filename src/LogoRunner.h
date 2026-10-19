@@ -75,7 +75,8 @@ private:
 	struct SliceRect
 	{
 		std::string name;
-		float x0, y0, x1, y1;// composition pixels, top-left origin
+		float x0, y0, x1, y1;// bounding box, composition pixels, top-left origin
+		float qx[ 4 ], qy[ 4 ];// quad corners, composition pixels, top-left origin
 	};
 	struct PathDef
 	{
@@ -87,6 +88,8 @@ private:
 		bool clip;
 		float chainOff;
 		float inset;
+		float ox[ 4 ], oy[ 4 ];// outer quad, GL pixels (y up)
+		float ix[ 4 ], iy[ 4 ];// inner quad
 	};
 
 	void RebuildAtlas();
