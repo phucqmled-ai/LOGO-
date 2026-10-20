@@ -24,7 +24,7 @@ static CFFGLPluginInfo PluginInfo(
 	2,                   // API major version number
 	1,                   // API minor version number
 	1,                   // Plugin major version number
-	3,                   // Plugin minor version number
+	4,                   // Plugin minor version number
 	FF_SOURCE,           // Plugin type
 	"Chay logo PNG va chu theo duong ngang, doc, tron, elip, vien chu nhat",
 	"QM LED" );
@@ -99,6 +99,7 @@ uniform int count;
 uniform float itemScale;
 uniform float gapFactor;
 uniform float aspects[ MAXI ];
+uniform float cumAspect[ MAXI ];
 uniform vec4 rects[ MAXI ];
 uniform int isText[ MAXI ];
 uniform sampler2D atlas;
@@ -127,7 +128,7 @@ void main()
 		vec2 center = R.xy;
 		vec2 size   = R.zw;
 		vec2 d      = p - center;
-		if( I.w > 0.5 && ( abs( d.x ) > size.x * 0.5 + M.w || abs( d.y ) > size.y * 0.5 + M.w ) )
+		if( I.w > 0.5 && ( abs( d.x ) > size.x * 0.5 || abs( d.y ) > size.y * 0.5 ) )
 			continue;
 
 		float s = 0.0, n = 0.0, nb = -1e9;
@@ -204,7 +205,7 @@ void main()
 				if( eL < 0.001 ) continue;
 				vec2 nrm = vec2( -ed.y, ed.x ) / eL;// inward for CCW winding
 				float nn = dot( p - A, nrm ) / thick;
-				if( !hit && nn >= 0.0 && nn <= 1.0 )
+				if( nn >= 0.0 && nn <= 1.0 )
 				{
 					vec2 P0 = mix( A, Ai, nn );
 					vec2 P1 = mix( B, Bi, nn );
@@ -215,6 +216,7 @@ void main()
 						n   = nn;
 						s   = cum + tt * eL;
 						hit = true;
+						break;
 					}
 				}
 				cum += eL;
@@ -254,39 +256,31 @@ void main()
 		if( inBand )
 			c = vec4( 0.0, 0.0, 0.0, bandFill );
 
-		if( count > 0 && n >= 0.0 && n <= 1.0 )
+		float cycle = M.w;
+		if( count > 0 && cycle > 0.0 && n >= 0.0 && n <= 1.0 )
 		{
-			float gap = gapFactor * thick;
-			float cycle = 0.0;
+			float gap = gapFactor * thick + M.x;
+			float x   = mod( s + M.y + M.z, cycle );
 			for( int i = 0; i < MAXI; ++i )
 			{
 				if( i >= count ) break;
-				cycle += thick * itemScale * aspects[ i ] + gap + M.x;
-			}
-			if( cycle > 0.0 )
-			{
-				float x = mod( s + M.y + M.z, cycle );
-				float acc = 0.0;
-				for( int i = 0; i < MAXI; ++i )
+				float acc = thick * itemScale * cumAspect[ i ] + gap * float( i );
+				if( x < acc ) break;
+				float len  = max( 1.0, thick * itemScale * aspects[ i ] );
+				float cell = len + gap;
+				if( x < acc + cell )
 				{
-					if( i >= count ) break;
-					float len  = max( 1.0, thick * itemScale * aspects[ i ] );
-					float cell = max( len, len + gap + M.x );
-					if( x >= acc && x < acc + cell )
+					float u = ( x - acc - ( cell - len ) * 0.5 ) / len;
+					float v = ( n - 0.5 ) / itemScale + 0.5;
+					if( u >= 0.0 && u <= 1.0 && v >= 0.0 && v <= 1.0 )
 					{
-						float u = ( x - acc - ( cell - len ) * 0.5 ) / len;
-						float v = ( n - 0.5 ) / itemScale + 0.5;
-						if( u >= 0.0 && u <= 1.0 && v >= 0.0 && v <= 1.0 )
-						{
-							vec4 r  = rects[ i ];
-							vec4 tx = texture( atlas, r.xy + vec2( u, v ) * r.zw );
-							if( isText[ i ] == 1 )
-								tx = vec4( textColor.rgb, 1.0 ) * tx.a * textColor.a;
-							c = over( tx, c );
-						}
-						break;
+						vec4 r  = rects[ i ];
+						vec4 tx = texture( atlas, r.xy + vec2( u, v ) * r.zw );
+						if( isText[ i ] == 1 )
+							tx = vec4( textColor.rgb, 1.0 ) * tx.a * textColor.a;
+						c = over( tx, c );
 					}
-					acc += cell;
+					break;
 				}
 			}
 		}
@@ -1224,6 +1218,14 @@ FFResult LogoRunner::ProcessOpenGL( ProcessOpenGLStruct* pGL )
 	int count   = (int)itemAspect.size();
 	int mode    = (int)std::lround( values[ P_SLICE_MODE ] );
 
+	float cumAspect[ MAX_ITEMS ] = {};
+	float totalAspect            = 0.0f;
+	for( int i = 0; i < count; ++i )
+	{
+		cumAspect[ i ] = totalAspect;
+		totalAspect += itemAspect[ i ];
+	}
+
 	std::vector< PathDef > paths;
 	BuildPaths( paths );
 	int np = (int)paths.size();
@@ -1236,12 +1238,10 @@ FFResult LogoRunner::ProcessOpenGL( ProcessOpenGLStruct* pGL )
 	for( int k = 0; k < np; ++k )
 	{
 		const PathDef& p = paths[ k ];
-		float base       = 0.0f;
-		for( int i = 0; i < count; ++i )
-			base += std::max( 1.0f, p.thick * scale * itemAspect[ i ] ) + gapF * p.thick;
-		float extra   = 0.0f;
-		bool closed   = p.type >= 2;
-		if( closed && count > 0 && base > 0 && mode != 3 )
+		float base       = p.thick * ( scale * totalAspect + gapF * count );
+		float extra      = 0.0f;
+		bool closed      = p.type >= 2 && p.type != 6;
+		if( closed && count > 0 && base > 1.0f && mode != 3 )
 		{
 			float rep = std::max( 1.0f, std::round( p.len / base ) );
 			extra     = ( p.len / rep - base ) / count;
@@ -1260,18 +1260,32 @@ FFResult LogoRunner::ProcessOpenGL( ProcessOpenGLStruct* pGL )
 					phase[ pk ] += cycle;
 			}
 		}
-		rectU[ k * 4 + 0 ]   = p.cx;
-		rectU[ k * 4 + 1 ]   = p.cy;
-		rectU[ k * 4 + 2 ]   = p.w;
-		rectU[ k * 4 + 3 ]   = p.h;
+		float bcx = p.cx, bcy = p.cy, bw = p.w, bh = p.h;
+		bool clip = p.clip;
+		if( p.type >= 5 )
+		{
+			float x0 = 1e9f, y0 = 1e9f, x1 = -1e9f, y1 = -1e9f;
+			for( int v = 0; v < 4; ++v )
+			{
+				x0 = std::min( x0, p.ox[ v ] ), x1 = std::max( x1, p.ox[ v ] );
+				y0 = std::min( y0, p.oy[ v ] ), y1 = std::max( y1, p.oy[ v ] );
+			}
+			bcx = ( x0 + x1 ) * 0.5f, bcy = ( y0 + y1 ) * 0.5f;
+			bw  = x1 - x0 + 4.0f, bh = y1 - y0 + 4.0f;
+			clip = true;
+		}
+		rectU[ k * 4 + 0 ]   = bcx;
+		rectU[ k * 4 + 1 ]   = bcy;
+		rectU[ k * 4 + 2 ]   = bw;
+		rectU[ k * 4 + 3 ]   = bh;
 		infoU[ k * 4 + 0 ]   = (float)p.type;
 		infoU[ k * 4 + 1 ]   = p.len;
 		infoU[ k * 4 + 2 ]   = p.thick;
-		infoU[ k * 4 + 3 ]   = p.clip ? 1.0f : 0.0f;
+		infoU[ k * 4 + 3 ]   = clip ? 1.0f : 0.0f;
 		motionU[ k * 4 + 0 ] = extra;
 		motionU[ k * 4 + 1 ] = p.chainOff;
 		motionU[ k * 4 + 2 ] = (float)phase[ pk ] + values[ P_OFFSET ] * cycle;
-		motionU[ k * 4 + 3 ] = p.inset;
+		motionU[ k * 4 + 3 ] = cycle;
 		for( int v = 0; v < 4; ++v )
 		{
 			outerU[ k * 8 + v * 2 + 0 ] = p.ox[ v ];
@@ -1311,6 +1325,7 @@ FFResult LogoRunner::ProcessOpenGL( ProcessOpenGLStruct* pGL )
 	if( count > 0 )
 	{
 		glUniform1fv( glGetUniformLocation( prog, "aspects" ), count, itemAspect.data() );
+		glUniform1fv( glGetUniformLocation( prog, "cumAspect" ), count, cumAspect );
 		glUniform4fv( glGetUniformLocation( prog, "rects" ), count, itemRect.data() );
 		glUniform1iv( glGetUniformLocation( prog, "isText" ), count, itemIsText.data() );
 	}
