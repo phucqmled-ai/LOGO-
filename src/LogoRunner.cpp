@@ -24,7 +24,7 @@ static CFFGLPluginInfo PluginInfo(
 	2,                   // API major version number
 	1,                   // API minor version number
 	1,                   // Plugin major version number
-	5,                   // Plugin minor version number
+	6,                   // Plugin minor version number
 	FF_SOURCE,           // Plugin type
 	"Chay logo PNG va chu theo duong ngang, doc, tron, elip, vien chu nhat",
 	"QM LED" );
@@ -64,12 +64,6 @@ uniform vec4 pOuter[ MAXP * 2 ]; // quad corners 0,1 then 2,3 (px, y up)
 uniform vec4 pInner[ MAXP * 2 ]; // inward offset quad for the band
 
 float cross2( vec2 a, vec2 b ) { return a.x * b.y - a.y * b.x; }
-
-vec2 corner( vec4 pair[ MAXP * 2 ], int k, int v )
-{
-	vec4 p = pair[ k * 2 + ( v >> 1 ) ];
-	return ( v & 1 ) == 0 ? p.xy : p.zw;
-}
 
 // inverse bilinear: where is p inside quad a,b,c,d (cyclic order)
 vec2 invBilinear( vec2 p, vec2 a, vec2 b, vec2 c, vec2 d )
@@ -127,6 +121,9 @@ void main()
 
 	{
 		int k  = vPath;
+		// read each quad once into locals; indexing a big uniform array per use is slow
+		vec2 O[ 4 ] = vec2[ 4 ]( pOuter[ k * 2 ].xy, pOuter[ k * 2 ].zw, pOuter[ k * 2 + 1 ].xy, pOuter[ k * 2 + 1 ].zw );
+		vec2 N[ 4 ] = vec2[ 4 ]( pInner[ k * 2 ].xy, pInner[ k * 2 ].zw, pInner[ k * 2 + 1 ].xy, pInner[ k * 2 + 1 ].zw );
 		vec4 R = pRect[ k ];
 		vec4 I = pInfo[ k ];
 		vec4 M = pMotion[ k ];
@@ -203,10 +200,10 @@ void main()
 			bool hit  = false;
 			for( int e = 0; e < 4; ++e )
 			{
-				vec2 A  = corner( pOuter, k, e );
-				vec2 B  = corner( pOuter, k, ( e + 1 ) & 3 );
-				vec2 Ai = corner( pInner, k, e );
-				vec2 Bi = corner( pInner, k, ( e + 1 ) & 3 );
+				vec2 A  = O[ e ];
+				vec2 B  = O[ ( e + 1 ) & 3 ];
+				vec2 Ai = N[ e ];
+				vec2 Bi = N[ ( e + 1 ) & 3 ];
 				vec2 ed = B - A;
 				float eL = length( ed );
 				if( eL < 0.001 ) continue;
@@ -238,10 +235,7 @@ void main()
 		else
 		{
 			// one straight band filling the quad
-			vec2 A = corner( pOuter, k, 0 );
-			vec2 B = corner( pOuter, k, 1 );
-			vec2 C = corner( pOuter, k, 2 );
-			vec2 D = corner( pOuter, k, 3 );
+			vec2 A = O[ 0 ], B = O[ 1 ], C = O[ 2 ], D = O[ 3 ];
 			vec2 uv2 = invBilinear( p, A, B, C, D );
 			if( uv2.x < 0.0 || uv2.x > 1.0 || uv2.y < 0.0 || uv2.y > 1.0 )
 			{
@@ -1459,6 +1453,7 @@ FFResult LogoRunner::ProcessOpenGL( ProcessOpenGLStruct* pGL )
 
 	float pad = std::max( 2.0f, values[ P_BORDER_WIDTH ] * 16.0f * k + values[ P_GLOW ] * 30.0f * k * 4.0f );
 	BuildGeometry( paths, pad, rw, rh );
+
 
 	ScopedSamplerActivation activateSampler( 0 );
 	Scoped2DTextureBinding textureBinding( atlasTex );
