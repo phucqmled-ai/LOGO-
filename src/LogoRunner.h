@@ -57,7 +57,6 @@ public:
 		P_SLICE_MODE,
 		P_SLICE_SELECT,
 		P_SLICE_FILE,
-		P_SLICE_MARGIN,
 		P_COUNT
 	};
 
@@ -75,8 +74,7 @@ private:
 	struct SliceRect
 	{
 		std::string name;
-		float x0, y0, x1, y1;// bounding box, composition pixels, top-left origin
-		float qx[ 4 ], qy[ 4 ];// quad corners, composition pixels, top-left origin
+		float x0, y0, x1, y1;// composition pixels, top-left origin
 	};
 	struct PathDef
 	{
@@ -87,9 +85,6 @@ private:
 		float len;
 		bool clip;
 		float chainOff;
-		float inset;
-		float ox[ 4 ], oy[ 4 ];// outer quad, GL pixels (y up)
-		float ix[ 4 ], iy[ 4 ];// inner quad
 	};
 
 	void RebuildAtlas();
@@ -115,11 +110,8 @@ private:
 	std::vector< float > itemRect;// x,y,w,h in atlas uv
 	GLuint atlasTex = 0;
 
-	void BuildGeometry( const std::vector< PathDef >& paths, float pad, float rw, float rh );
-
 	ffglex::FFGLShader shader;
-	GLuint vao = 0, vbo = 0;
-	std::vector< float > verts;// x, y, pathIndex
+	ffglex::FFGLScreenQuad quad;
 
 	std::string sliceFile;          // user chosen, empty = auto
 	std::string loadedSliceFile;

@@ -24,7 +24,7 @@ static CFFGLPluginInfo PluginInfo(
 	2,                   // API major version number
 	1,                   // API minor version number
 	1,                   // Plugin major version number
-	6,                   // Plugin minor version number
+	1,                   // Plugin minor version number
 	FF_SOURCE,           // Plugin type
 	"Chay logo PNG va chu theo duong ngang, doc, tron, elip, vien chu nhat",
 	"QM LED" );
@@ -35,69 +35,32 @@ static const int MAX_W   = 4096;
 static const float PI_F  = 3.14159265358979f;
 
 static const char vertexShaderCode[] = R"(#version 410 core
-layout( location = 0 ) in vec2 aPos; // pixels, y up
-layout( location = 1 ) in float aPath;
-uniform vec2 res;
-out vec2 vPix;
-flat out int vPath;
+layout( location = 0 ) in vec4 vPosition;
+layout( location = 1 ) in vec2 vUV;
+out vec2 uv;
 void main()
 {
-	vPix  = aPos;
-	vPath = int( floor( aPath + 0.5 ) );
-	gl_Position = vec4( aPos / res * 2.0 - 1.0, 0.0, 1.0 );
+	gl_Position = vPosition;
+	uv = vUV;
 }
 )";
 
 static const char fragmentShaderCode[] = R"(#version 410 core
 #define MAXI 16
 #define MAXP 16
-in vec2 vPix;
-flat in int vPath;
+in vec2 uv;
 out vec4 fragColor;
 
 uniform vec2 res;
 uniform int pathCount;
 uniform vec4 pRect[ MAXP ];   // cx, cy, w, h (px, y up)
 uniform vec4 pInfo[ MAXP ];   // type, length, thickness, clip
-uniform vec4 pMotion[ MAXP ]; // extra gap, chain offset, scroll phase, clip inset
-uniform vec4 pOuter[ MAXP * 2 ]; // quad corners 0,1 then 2,3 (px, y up)
-uniform vec4 pInner[ MAXP * 2 ]; // inward offset quad for the band
-
-float cross2( vec2 a, vec2 b ) { return a.x * b.y - a.y * b.x; }
-
-// inverse bilinear: where is p inside quad a,b,c,d (cyclic order)
-vec2 invBilinear( vec2 p, vec2 a, vec2 b, vec2 c, vec2 d )
-{
-	vec2 e = b - a, f = d - a, g = a - b + c - d, h = p - a;
-	float k2 = cross2( g, f );
-	float k1 = cross2( e, f ) + cross2( h, g );
-	float k0 = cross2( h, e );
-	float v;
-	if( abs( k2 ) < 0.0001 * abs( k1 ) )
-	{
-		if( abs( k1 ) < 1e-9 ) return vec2( -1.0 );
-		v = -k0 / k1;
-	}
-	else
-	{
-		float w = k1 * k1 - 4.0 * k0 * k2;
-		if( w < 0.0 ) return vec2( -1.0 );
-		w = sqrt( w );
-		v = ( -k1 - w ) / ( 2.0 * k2 );
-		if( v < 0.0 || v > 1.0 )
-			v = ( -k1 + w ) / ( 2.0 * k2 );
-	}
-	vec2 den = e + g * v;
-	vec2 num = h - f * v;
-	float u  = abs( den.x ) > abs( den.y ) ? num.x / den.x : num.y / den.y;
-	return vec2( u, v );
-}
+uniform vec4 pMotion[ MAXP ]; // extra gap, chain offset, scroll phase, -
 uniform int flipSide;
 uniform int count;
 uniform float itemScale;
 uniform float gapFactor;
 uniform float aspects[ MAXI ];
-uniform float cumAspect[ MAXI ];
 uniform vec4 rects[ MAXI ];
 uniform int isText[ MAXI ];
 uniform sampler2D atlas;
@@ -111,19 +74,12 @@ vec4 over( vec4 top, vec4 bottom ) { return top + bottom * ( 1.0 - top.a ); }
 
 void main()
 {
-	if( vPath < 0 )
-	{
-		fragColor = vec4( 0.0 );
-		return;
-	}
-	vec2 p   = vPix;
+	vec2 p   = uv * res;
 	vec4 col = vec4( 0.0 );
 
+	for( int k = 0; k < MAXP; ++k )
 	{
-		int k  = vPath;
-		// read each quad once into locals; indexing a big uniform array per use is slow
-		vec2 O[ 4 ] = vec2[ 4 ]( pOuter[ k * 2 ].xy, pOuter[ k * 2 ].zw, pOuter[ k * 2 + 1 ].xy, pOuter[ k * 2 + 1 ].zw );
-		vec2 N[ 4 ] = vec2[ 4 ]( pInner[ k * 2 ].xy, pInner[ k * 2 ].zw, pInner[ k * 2 + 1 ].xy, pInner[ k * 2 + 1 ].zw );
+		if( k >= pathCount ) break;
 		vec4 R = pRect[ k ];
 		vec4 I = pInfo[ k ];
 		vec4 M = pMotion[ k ];
@@ -133,9 +89,10 @@ void main()
 		vec2 center = R.xy;
 		vec2 size   = R.zw;
 		vec2 d      = p - center;
+		if( I.w > 0.5 && ( abs( d.x ) > size.x * 0.5 || abs( d.y ) > size.y * 0.5 ) )
+			continue;
 
-
-		float s = 0.0, n = 0.0, nb = -1e9;
+		float s = 0.0, n = 0.0;
 		bool along = true;
 		if( shape == 0 )
 		{
@@ -158,146 +115,77 @@ void main()
 			n = ( length( d ) - length( m ) ) / thick + 0.5;
 			s = fract( 0.25 - t / 6.28318530718 ) * L;
 		}
-		else if( shape == 4 )
+		else
 		{
-			float W  = max( size.x - thick, 1.0 );
-			float H  = max( size.y - thick, 1.0 );
-			float rc = min( thick * 0.5, min( W, H ) * 0.5 );
-			float a  = W * 0.5 - rc, b = H * 0.5 - rc;
-			float A  = 1.57079632679 * rc;// quarter arc length
-			vec2 q   = abs( d ) - vec2( a, b );
-			// square edges for band + border lines so they reach the slice corners
-			vec2 e = abs( d ) - vec2( W, H ) * 0.5;
-			nb = max( e.x, e.y ) / thick + 0.5;
-			if( q.x > 0.0 && q.y > 0.0 )
+			float W = max( size.x - thick, 1.0 );
+			float H = max( size.y - thick, 1.0 );
+			float hw = W * 0.5, hh = H * 0.5;
+			float ex = abs( d.x ) - hw;
+			float ey = abs( d.y ) - hh;
+			if( ey > ex )
 			{
-				vec2 cc = sign( d ) * vec2( a, b );
-				vec2 v  = d - cc;
-				float th = atan( v.y, v.x );
-				n = ( length( v ) - rc ) / thick + 0.5;
-				if( d.x > 0.0 && d.y > 0.0 )      s = 2.0 * a + ( 1.57079632679 - th ) * rc;
-				else if( d.x > 0.0 )              s = 2.0 * a + 2.0 * b + 2.0 * A + ( -th ) * rc;
-				else if( d.y < 0.0 )              s = 4.0 * a + 2.0 * b + 4.0 * A + ( -1.57079632679 - th ) * rc;
-				else                              s = 4.0 * a + 4.0 * b + 6.0 * A + ( th - 1.57079632679 ) * rc;
-			}
-			else if( q.y > q.x )
-			{
-				n = ( abs( d.y ) - H * 0.5 ) / thick + 0.5;
-				if( d.y > 0.0 ) s = d.x + a;
-				else            s = 2.0 * a + 2.0 * b + 4.0 * A + ( a - d.x );
+				if( d.y > 0.0 ) { s = d.x + hw;                   n = ( d.y - hh ) / thick + 0.5; }
+				else            { s = W + H + ( hw - d.x );       n = ( -d.y - hh ) / thick + 0.5; }
 			}
 			else
 			{
-				n = ( abs( d.x ) - W * 0.5 ) / thick + 0.5;
-				if( d.x > 0.0 ) s = 2.0 * a + 2.0 * A + ( b - d.y );
-				else            s = 4.0 * a + 2.0 * b + 6.0 * A + ( d.y + b );
+				if( d.x > 0.0 ) { s = W + ( hh - d.y );           n = ( d.x - hw ) / thick + 0.5; }
+				else            { s = 2.0 * W + H + ( d.y + hh ); n = ( -d.x - hw ) / thick + 0.5; }
 			}
 		}
-		else if( shape == 5 )
-		{
-			// band hugging the quad outline
-			float cum = 0.0;
-			bool hit  = false;
-			for( int e = 0; e < 4; ++e )
-			{
-				vec2 A  = O[ e ];
-				vec2 B  = O[ ( e + 1 ) & 3 ];
-				vec2 Ai = N[ e ];
-				vec2 Bi = N[ ( e + 1 ) & 3 ];
-				vec2 ed = B - A;
-				float eL = length( ed );
-				if( eL < 0.001 ) continue;
-				vec2 nrm = vec2( -ed.y, ed.x ) / eL;// inward for CCW winding
-				float nn = dot( p - A, nrm ) / thick;
-				if( nn >= 0.0 && nn <= 1.0 )
-				{
-					vec2 P0 = mix( A, Ai, nn );
-					vec2 P1 = mix( B, Bi, nn );
-					vec2 dd = P1 - P0;
-					float tt = dot( p - P0, dd ) / max( dot( dd, dd ), 1e-6 );
-					if( tt >= 0.0 && tt <= 1.0 )
-					{
-						n   = nn;
-						s   = cum + tt * eL;
-						hit = true;
-						break;
-					}
-				}
-				cum += eL;
-			}
-			if( !hit )
-			{
-				fragColor = vec4( 0.0 );
-				return;
-			}
-			nb = n;
-		}
-		else
-		{
-			// one straight band filling the quad
-			vec2 A = O[ 0 ], B = O[ 1 ], C = O[ 2 ], D = O[ 3 ];
-			vec2 uv2 = invBilinear( p, A, B, C, D );
-			if( uv2.x < 0.0 || uv2.x > 1.0 || uv2.y < 0.0 || uv2.y > 1.0 )
-			{
-				fragColor = vec4( 0.0 );
-				return;
-			}
-			s = uv2.x * L;
-			float across = distance( A, D );
-			n  = ( uv2.y - 0.5 ) * across / max( thick, 1.0 ) + 0.5;
-			nb = n;
-		}
-		if( nb < -1e8 )
-			nb = n;
 		if( flipSide == 1 )
 		{
-			n  = 1.0 - n;
-			nb = 1.0 - nb;
-			s  = L - s;
+			n = 1.0 - n;
+			s = L - s;
 		}
 		if( !along )
-		{
-			fragColor = vec4( 0.0 );
-			return;
-		}
+			continue;
 
 		vec4 c = vec4( 0.0 );
-		bool inBand = nb >= 0.0 && nb <= 1.0;
+		bool inBand = n >= 0.0 && n <= 1.0;
 		if( inBand )
 			c = vec4( 0.0, 0.0, 0.0, bandFill );
 
-		float cycle = M.w;
-		if( count > 0 && cycle > 0.0 && n >= 0.0 && n <= 1.0 )
+		if( count > 0 && inBand )
 		{
-			float gap = gapFactor * thick + M.x;
-			float x   = mod( s + M.y + M.z, cycle );
+			float gap = gapFactor * thick;
+			float cycle = 0.0;
 			for( int i = 0; i < MAXI; ++i )
 			{
 				if( i >= count ) break;
-				float acc = thick * itemScale * cumAspect[ i ] + gap * float( i );
-				if( x < acc ) break;
-				float len  = max( 1.0, thick * itemScale * aspects[ i ] );
-				float cell = len + gap;
-				if( x < acc + cell )
+				cycle += thick * itemScale * aspects[ i ] + gap + M.x;
+			}
+			if( cycle > 0.0 )
+			{
+				float x = mod( s + M.y + M.z, cycle );
+				float acc = 0.0;
+				for( int i = 0; i < MAXI; ++i )
 				{
-					float u = ( x - acc - ( cell - len ) * 0.5 ) / len;
-					float v = ( n - 0.5 ) / itemScale + 0.5;
-					if( u >= 0.0 && u <= 1.0 && v >= 0.0 && v <= 1.0 )
+					if( i >= count ) break;
+					float len  = max( 1.0, thick * itemScale * aspects[ i ] );
+					float cell = max( len, len + gap + M.x );
+					if( x >= acc && x < acc + cell )
 					{
-						vec4 r  = rects[ i ];
-						vec4 tx = texture( atlas, r.xy + vec2( u, v ) * r.zw );
-						if( isText[ i ] == 1 )
-							tx = vec4( textColor.rgb, 1.0 ) * tx.a * textColor.a;
-						c = over( tx, c );
+						float u = ( x - acc - ( cell - len ) * 0.5 ) / len;
+						float v = ( n - 0.5 ) / itemScale + 0.5;
+						if( u >= 0.0 && u <= 1.0 && v >= 0.0 && v <= 1.0 )
+						{
+							vec4 r  = rects[ i ];
+							vec4 tx = texture( atlas, r.xy + vec2( u, v ) * r.zw );
+							if( isText[ i ] == 1 )
+								tx = vec4( textColor.rgb, 1.0 ) * tx.a * textColor.a;
+							c = over( tx, c );
+						}
+						break;
 					}
-					break;
+					acc += cell;
 				}
 			}
 		}
 
 		if( borderColor.a > 0.0 )
 		{
-			float dpx  = min( abs( nb ), abs( nb - 1.0 ) ) * thick;
+			float dpx  = min( abs( n ), abs( n - 1.0 ) ) * thick;
 			float line = 1.0 - smoothstep( borderW * 0.5 - 0.75, borderW * 0.5 + 0.75, dpx );
 			float glow = glowR > 0.5 ? exp( -max( dpx - borderW * 0.5, 0.0 ) / glowR ) * 0.6 : 0.0;
 			float a    = clamp( max( line, glow ), 0.0, 1.0 ) * borderColor.a;
@@ -398,10 +286,8 @@ LogoRunner::LogoRunner()
 	SetParamElementInfo( P_SLICE_MODE, 3, "Noi lien cac slice", 3.0f );
 	SetParamInfo( P_SLICE_SELECT, "Slice", FF_TYPE_STANDARD, 0.0f );
 	SetFileParamInfo( P_SLICE_FILE, "Slice File", { "xml" }, "" );
-	SetParamInfo( P_SLICE_MARGIN, "Slice Margin", FF_TYPE_STANDARD, 0.2f );
-	values[ P_SLICE_MARGIN ] = 0.2f;
 
-	for( unsigned int i = P_SLICE_MODE; i <= P_SLICE_MARGIN; ++i )
+	for( unsigned int i = P_SLICE_MODE; i <= P_SLICE_FILE; ++i )
 		SetParamGroup( i, "Slices" );
 	for( unsigned int i = P_LOGO1; i <= P_TEXT_ALPHA; ++i )
 		SetParamGroup( i, "Content" );
@@ -425,16 +311,10 @@ FFResult LogoRunner::InitGL( const FFGLViewportStruct* vp )
 		DeInitGL();
 		return FF_FAIL;
 	}
-	glGenVertexArrays( 1, &vao );
-	glGenBuffers( 1, &vbo );
+	if( !quad.Initialise() )
 	{
-		ScopedVAOBinding vaoBinding( vao );
-		glBindBuffer( GL_ARRAY_BUFFER, vbo );
-		glEnableVertexAttribArray( 0 );
-		glVertexAttribPointer( 0, 2, GL_FLOAT, GL_FALSE, 3 * sizeof( float ), (void*)0 );
-		glEnableVertexAttribArray( 1 );
-		glVertexAttribPointer( 1, 1, GL_FLOAT, GL_FALSE, 3 * sizeof( float ), (void*)( 2 * sizeof( float ) ) );
-		glBindBuffer( GL_ARRAY_BUFFER, 0 );
+		DeInitGL();
+		return FF_FAIL;
 	}
 	contentDirty = true;
 	hasLastTime  = false;
@@ -444,8 +324,7 @@ FFResult LogoRunner::InitGL( const FFGLViewportStruct* vp )
 FFResult LogoRunner::DeInitGL()
 {
 	shader.FreeGLResources();
-	if( vbo ) { glDeleteBuffers( 1, &vbo ); vbo = 0; }
-	if( vao ) { glDeleteVertexArrays( 1, &vao ); vao = 0; }
+	quad.Release();
 	if( atlasTex )
 	{
 		glDeleteTextures( 1, &atlasTex );
@@ -831,11 +710,7 @@ float LogoRunner::PathLen( int type, float w, float h, float thick )
 		return PI_F * ( 3.0f * ( a + b ) - std::sqrt( ( 3.0f * a + b ) * ( a + 3.0f * b ) ) );
 	}
 	default:
-	{
-		float W  = std::max( w - thick, 1.0f ), H = std::max( h - thick, 1.0f );
-		float rc = std::min( thick * 0.5f, std::min( W, H ) * 0.5f );
-		return 2.0f * ( W + H ) - 8.0f * rc + 2.0f * PI_F * rc;
-	}
+		return 2.0f * ( std::max( w - thick, 1.0f ) + std::max( h - thick, 1.0f ) );
 	}
 }
 
@@ -952,8 +827,8 @@ bool LogoRunner::LoadSlices( const std::string& path )
 			size_t irEnd = block.find( "</Input", ir );
 			std::string rectBlock = block.substr( ir, irEnd == std::string::npos ? std::string::npos : irEnd - ir );
 			float x0 = 1e9f, y0 = 1e9f, x1 = -1e9f, y1 = -1e9f;
-			std::vector< float > vxs, vys;
 			size_t vp = 0;
+			int nv    = 0;
 			while( ( vp = rectBlock.find( "<v ", vp ) ) != std::string::npos )
 			{
 				std::string vt = rectBlock.substr( vp, rectBlock.find( '>', vp ) - vp );
@@ -961,27 +836,12 @@ bool LogoRunner::LoadSlices( const std::string& path )
 				float y        = (float)atof( Attr( vt, "y" ).c_str() );
 				x0 = std::min( x0, x ), x1 = std::max( x1, x );
 				y0 = std::min( y0, y ), y1 = std::max( y1, y );
-				vxs.push_back( x );
-				vys.push_back( y );
+				++nv;
 				vp += 3;
 			}
-			int nv = (int)vxs.size();
 			if( nv < 2 || x1 - x0 < 2 || y1 - y0 < 2 )
 				continue;
 			r.x0 = x0, r.y0 = y0, r.x1 = x1, r.y1 = y1;
-			if( nv == 4 )
-			{
-				for( int k = 0; k < 4; ++k )
-					r.qx[ k ] = vxs[ k ], r.qy[ k ] = vys[ k ];
-			}
-			else
-			{
-				// not a quad: fall back to the bounding box
-				const float bx[ 4 ] = { x0, x1, x1, x0 };
-				const float by[ 4 ] = { y0, y0, y1, y1 };
-				for( int k = 0; k < 4; ++k )
-					r.qx[ k ] = bx[ k ], r.qy[ k ] = by[ k ];
-			}
 			bool dup = false;
 			for( const SliceRect& o : found )
 				if( std::fabs( o.x0 - r.x0 ) < 1 && std::fabs( o.y0 - r.y0 ) < 1 && std::fabs( o.x1 - r.x1 ) < 1 && std::fabs( o.y1 - r.y1 ) < 1 )
@@ -1026,59 +886,6 @@ void LogoRunner::CheckSliceFile()
 	}
 }
 
-// Shrink a convex quad inward by d along the vertex bisectors.
-static void OffsetQuad( const float* qx, const float* qy, float d, float* ox, float* oy )
-{
-	// inward normals per edge, assuming counter-clockwise winding in GL space
-	float nx[ 4 ], ny[ 4 ];
-	for( int e = 0; e < 4; ++e )
-	{
-		int f     = ( e + 1 ) & 3;
-		float ex  = qx[ f ] - qx[ e ], ey = qy[ f ] - qy[ e ];
-		float len = std::sqrt( ex * ex + ey * ey );
-		if( len < 1e-4f )
-			len = 1e-4f;
-		nx[ e ] = -ey / len;// rotate +90 deg => points inside for CCW winding
-		ny[ e ] = ex / len;
-	}
-	for( int v = 0; v < 4; ++v )
-	{
-		int e0 = ( v + 3 ) & 3, e1 = v;// edges meeting at vertex v
-		// intersect the two offset lines
-		float a1 = nx[ e0 ], b1 = ny[ e0 ], c1 = nx[ e0 ] * qx[ v ] + ny[ e0 ] * qy[ v ] + d;
-		float a2 = nx[ e1 ], b2 = ny[ e1 ], c2 = nx[ e1 ] * qx[ v ] + ny[ e1 ] * qy[ v ] + d;
-		float det = a1 * b2 - a2 * b1;
-		if( std::fabs( det ) < 1e-5f )
-		{
-			ox[ v ] = qx[ v ] + nx[ e1 ] * d;
-			oy[ v ] = qy[ v ] + ny[ e1 ] * d;
-		}
-		else
-		{
-			ox[ v ] = ( c1 * b2 - c2 * b1 ) / det;
-			oy[ v ] = ( a1 * c2 - a2 * c1 ) / det;
-		}
-	}
-}
-
-static float QuadInradius( const float* qx, const float* qy )
-{
-	// distance from the centroid to the nearest edge
-	float cx = 0, cy = 0;
-	for( int i = 0; i < 4; ++i )
-		cx += qx[ i ] * 0.25f, cy += qy[ i ] * 0.25f;
-	float best = 1e9f;
-	for( int e = 0; e < 4; ++e )
-	{
-		int f     = ( e + 1 ) & 3;
-		float ex  = qx[ f ] - qx[ e ], ey = qy[ f ] - qy[ e ];
-		float len = std::max( 1e-4f, std::sqrt( ex * ex + ey * ey ) );
-		float d   = std::fabs( ( -ey * ( cx - qx[ e ] ) + ex * ( cy - qy[ e ] ) ) / len );
-		best      = std::min( best, d );
-	}
-	return best;
-}
-
 void LogoRunner::BuildPaths( std::vector< PathDef >& out ) const
 {
 	out.clear();
@@ -1099,213 +906,48 @@ void LogoRunner::BuildPaths( std::vector< PathDef >& out ) const
 		p.len      = PathLen( p.type, p.w, p.h, thick );
 		p.clip     = false;
 		p.chainOff = 0;
-		p.inset    = 0;
-		for( int k = 0; k < 4; ++k )
-			p.ox[ k ] = p.oy[ k ] = p.ix[ k ] = p.iy[ k ] = 0.0f;
 		out.push_back( p );
 		return;
 	}
 
-	int sel  = (int)std::lround( values[ P_SLICE_SELECT ] * slices.size() );
+	int sel = (int)std::lround( values[ P_SLICE_SELECT ] * slices.size() );
 	float sx = rw / compW, sy = rh / compH;
-	float borderPx = values[ P_BORDER ] > 0.5f ? std::max( 0.5f, values[ P_BORDER_WIDTH ] * 16.0f * ( rh / 1080.0f ) ) : 0.0f;
-	float inset    = borderPx * 0.5f + 1.0f + ( values[ P_SLICE_MARGIN ] - 0.2f ) * 100.0f * ( rh / 1080.0f );
-
-	// thinnest slice decides the common thickness in chain mode
 	float chainThick = thick;
 	for( size_t i = 0; i < slices.size(); ++i )
 	{
 		if( sel > 0 && (int)i != sel - 1 )
 			continue;
-		float qx[ 4 ], qy[ 4 ];
-		for( int k = 0; k < 4; ++k )
-			qx[ k ] = slices[ i ].qx[ k ] * sx, qy[ k ] = rh - slices[ i ].qy[ k ] * sy;
-		chainThick = std::min( chainThick, QuadInradius( qx, qy ) * 2.0f );
+		const SliceRect& s = slices[ i ];
+		float w = ( s.x1 - s.x0 ) * sx, h = ( s.y1 - s.y0 ) * sy;
+		chainThick = std::min( chainThick, std::min( w, h ) );
 	}
-
 	float chain = 0.0f;
 	for( size_t i = 0; i < slices.size(); ++i )
 	{
 		if( sel > 0 && (int)i != sel - 1 )
 			continue;
 		const SliceRect& s = slices[ i ];
-		float qx[ 4 ], qy[ 4 ];
-		for( int k = 0; k < 4; ++k )
-			qx[ k ] = s.qx[ k ] * sx, qy[ k ] = rh - s.qy[ k ] * sy;
-
-		// make the winding counter-clockwise in GL space
-		float area = 0;
-		for( int k = 0; k < 4; ++k )
-		{
-			int f = ( k + 1 ) & 3;
-			area += qx[ k ] * qy[ f ] - qx[ f ] * qy[ k ];
-		}
-		if( area < 0 )
-		{
-			std::swap( qx[ 1 ], qx[ 3 ] );
-			std::swap( qy[ 1 ], qy[ 3 ] );
-		}
-
 		PathDef p;
-		p.clip  = false;// quad shapes bound themselves
-		p.inset = inset;
-		float inr = QuadInradius( qx, qy );
-		float in  = std::min( inset, inr - 2.0f );
-		if( in > 0.0f )
-			OffsetQuad( qx, qy, in, p.ox, p.oy );
-		else
-			for( int k = 0; k < 4; ++k )
-				p.ox[ k ] = qx[ k ], p.oy[ k ] = qy[ k ];
-
-		float edge[ 4 ];
-		for( int e = 0; e < 4; ++e )
-		{
-			int f     = ( e + 1 ) & 3;
-			edge[ e ] = std::sqrt( ( p.ox[ f ] - p.ox[ e ] ) * ( p.ox[ f ] - p.ox[ e ] ) + ( p.oy[ f ] - p.oy[ e ] ) * ( p.oy[ f ] - p.oy[ e ] ) );
-		}
-		float inr2 = QuadInradius( p.ox, p.oy );
-
+		p.cx   = ( s.x0 + s.x1 ) * 0.5f * sx;
+		p.cy   = rh - ( s.y0 + s.y1 ) * 0.5f * sy;
+		p.w    = ( s.x1 - s.x0 ) * sx;
+		p.h    = ( s.y1 - s.y0 ) * sy;
+		p.clip = true;
+		float shortSide = std::min( p.w, p.h );
 		if( mode == 1 )
 		{
-			p.type  = 5;// band hugging the quad outline
-			p.thick = std::max( 2.0f, std::min( thick, inr2 * 0.95f ) );
-			p.len   = edge[ 0 ] + edge[ 1 ] + edge[ 2 ] + edge[ 3 ];
-			OffsetQuad( p.ox, p.oy, p.thick, p.ix, p.iy );
+			p.type  = 4;
+			p.thick = std::max( 2.0f, std::min( thick, shortSide * 0.5f ) );
 		}
 		else
 		{
-			p.type  = 6;// one straight band filling the quad
-			float along = ( edge[ 0 ] + edge[ 2 ] ) * 0.5f;
-			float cross = ( edge[ 1 ] + edge[ 3 ] ) * 0.5f;
-			if( cross > along )
-			{
-				// rotate the corner order so that edge 0->1 is the long side
-				float tx[ 4 ], ty[ 4 ];
-				for( int k = 0; k < 4; ++k )
-					tx[ k ] = p.ox[ ( k + 1 ) & 3 ], ty[ k ] = p.oy[ ( k + 1 ) & 3 ];
-				for( int k = 0; k < 4; ++k )
-					p.ox[ k ] = tx[ k ], p.oy[ k ] = ty[ k ];
-				std::swap( along, cross );
-			}
-			p.thick = mode == 3 ? std::min( chainThick, cross ) : std::max( 2.0f, std::min( thick, cross ) );
-			p.len   = along;
-			for( int k = 0; k < 4; ++k )
-				p.ix[ k ] = p.ox[ k ], p.iy[ k ] = p.oy[ k ];
+			p.type  = p.w >= p.h ? 0 : 1;
+			p.thick = mode == 3 ? chainThick : std::max( 2.0f, std::min( thick, shortSide ) );
 		}
-
-		float cx = 0, cy = 0;
-		for( int k = 0; k < 4; ++k )
-			cx += p.ox[ k ] * 0.25f, cy += p.oy[ k ] * 0.25f;
-		p.cx       = cx;
-		p.cy       = cy;
-		p.w        = ( s.x1 - s.x0 ) * sx;
-		p.h        = ( s.y1 - s.y0 ) * sy;
+		p.len      = PathLen( p.type, p.w, p.h, p.thick );
 		p.chainOff = mode == 3 ? chain : 0.0f;
 		chain += p.len;
 		out.push_back( p );
-	}
-}
-
-// Build only the triangles the band actually covers, so the GPU never shades
-// the empty parts of the frame.
-void LogoRunner::BuildGeometry( const std::vector< PathDef >& paths, float pad, float rw, float rh )
-{
-	verts.clear();
-	auto pushTri = [ & ]( float ax, float ay, float bx, float by, float cx, float cy, float idx ) {
-		verts.push_back( ax ); verts.push_back( ay ); verts.push_back( idx );
-		verts.push_back( bx ); verts.push_back( by ); verts.push_back( idx );
-		verts.push_back( cx ); verts.push_back( cy ); verts.push_back( idx );
-	};
-	auto pushQuad = [ & ]( const float* qx, const float* qy, float idx ) {
-		pushTri( qx[ 0 ], qy[ 0 ], qx[ 1 ], qy[ 1 ], qx[ 2 ], qy[ 2 ], idx );
-		pushTri( qx[ 0 ], qy[ 0 ], qx[ 2 ], qy[ 2 ], qx[ 3 ], qy[ 3 ], idx );
-	};
-	auto pushRing = [ & ]( const float* ox, const float* oy, const float* ix, const float* iy, float idx ) {
-		for( int e = 0; e < 4; ++e )
-		{
-			int f = ( e + 1 ) & 3;
-			pushTri( ox[ e ], oy[ e ], ox[ f ], oy[ f ], ix[ f ], iy[ f ], idx );
-			pushTri( ox[ e ], oy[ e ], ix[ f ], iy[ f ], ix[ e ], iy[ e ], idx );
-		}
-	};
-
-	// full frame pass that writes transparent, so nothing from the host shows through
-	{
-		float qx[ 4 ] = { 0, rw, rw, 0 };
-		float qy[ 4 ] = { 0, 0, rh, rh };
-		pushQuad( qx, qy, -1.0f );
-	}
-
-	for( size_t k = 0; k < paths.size(); ++k )
-	{
-		const PathDef& p = paths[ k ];
-		float idx        = (float)k;
-		float hw         = p.thick * 0.5f + pad;
-
-		if( p.type == 5 )
-		{
-			float ox[ 4 ], oy[ 4 ], ix[ 4 ], iy[ 4 ];
-			OffsetQuad( p.ox, p.oy, -pad, ox, oy );
-			OffsetQuad( p.ox, p.oy, p.thick + pad, ix, iy );
-			pushRing( ox, oy, ix, iy, idx );
-		}
-		else if( p.type == 6 )
-		{
-			float across = std::sqrt( ( p.ox[ 0 ] - p.ox[ 3 ] ) * ( p.ox[ 0 ] - p.ox[ 3 ] ) + ( p.oy[ 0 ] - p.oy[ 3 ] ) * ( p.oy[ 0 ] - p.oy[ 3 ] ) );
-			float half   = std::min( 0.5f, hw / std::max( across, 1.0f ) );
-			float v0 = 0.5f - half, v1 = 0.5f + half;
-			auto bilerp = [ & ]( float u, float v, float& x, float& y ) {
-				float tx = p.ox[ 0 ] + ( p.ox[ 1 ] - p.ox[ 0 ] ) * u;
-				float ty = p.oy[ 0 ] + ( p.oy[ 1 ] - p.oy[ 0 ] ) * u;
-				float bx = p.ox[ 3 ] + ( p.ox[ 2 ] - p.ox[ 3 ] ) * u;
-				float by = p.oy[ 3 ] + ( p.oy[ 2 ] - p.oy[ 3 ] ) * u;
-				x = tx + ( bx - tx ) * v;
-				y = ty + ( by - ty ) * v;
-			};
-			float qx[ 4 ], qy[ 4 ];
-			bilerp( 0, v0, qx[ 0 ], qy[ 0 ] );
-			bilerp( 1, v0, qx[ 1 ], qy[ 1 ] );
-			bilerp( 1, v1, qx[ 2 ], qy[ 2 ] );
-			bilerp( 0, v1, qx[ 3 ], qy[ 3 ] );
-			pushQuad( qx, qy, idx );
-		}
-		else if( p.type == 0 || p.type == 1 )
-		{
-			float halfW = p.type == 0 ? p.w * 0.5f : hw;
-			float halfH = p.type == 0 ? hw : p.h * 0.5f;
-			float qx[ 4 ] = { p.cx - halfW, p.cx + halfW, p.cx + halfW, p.cx - halfW };
-			float qy[ 4 ] = { p.cy - halfH, p.cy - halfH, p.cy + halfH, p.cy + halfH };
-			pushQuad( qx, qy, idx );
-		}
-		else if( p.type == 2 || p.type == 3 )
-		{
-			float rx = p.type == 2 ? p.h * 0.5f - p.thick * 0.5f : p.w * 0.5f - p.thick * 0.5f;
-			float ry = p.h * 0.5f - p.thick * 0.5f;
-			rx       = std::max( rx, 1.0f );
-			ry       = std::max( ry, 1.0f );
-			const int N = 72;
-			for( int i = 0; i < N; ++i )
-			{
-				float a0 = 2.0f * PI_F * i / N, a1 = 2.0f * PI_F * ( i + 1 ) / N;
-				float c0 = std::cos( a0 ), s0 = std::sin( a0 ), c1 = std::cos( a1 ), s1 = std::sin( a1 );
-				float o0x = p.cx + ( rx + hw ) * c0, o0y = p.cy + ( ry + hw ) * s0;
-				float o1x = p.cx + ( rx + hw ) * c1, o1y = p.cy + ( ry + hw ) * s1;
-				float i0x = p.cx + std::max( rx - hw, 0.0f ) * c0, i0y = p.cy + std::max( ry - hw, 0.0f ) * s0;
-				float i1x = p.cx + std::max( rx - hw, 0.0f ) * c1, i1y = p.cy + std::max( ry - hw, 0.0f ) * s1;
-				pushTri( o0x, o0y, o1x, o1y, i1x, i1y, idx );
-				pushTri( o0x, o0y, i1x, i1y, i0x, i0y, idx );
-			}
-		}
-		else
-		{
-			float ow = p.w * 0.5f + pad, oh = p.h * 0.5f + pad;
-			float iw = std::max( 0.0f, p.w * 0.5f - p.thick - pad ), ih = std::max( 0.0f, p.h * 0.5f - p.thick - pad );
-			float ox[ 4 ] = { p.cx - ow, p.cx + ow, p.cx + ow, p.cx - ow };
-			float oy[ 4 ] = { p.cy - oh, p.cy - oh, p.cy + oh, p.cy + oh };
-			float ix[ 4 ] = { p.cx - iw, p.cx + iw, p.cx + iw, p.cx - iw };
-			float iy[ 4 ] = { p.cy - ih, p.cy - ih, p.cy + ih, p.cy + ih };
-			pushRing( ox, oy, ix, iy, idx );
-		}
 	}
 }
 
@@ -1338,14 +980,6 @@ FFResult LogoRunner::ProcessOpenGL( ProcessOpenGLStruct* pGL )
 	int count   = (int)itemAspect.size();
 	int mode    = (int)std::lround( values[ P_SLICE_MODE ] );
 
-	float cumAspect[ MAX_ITEMS ] = {};
-	float totalAspect            = 0.0f;
-	for( int i = 0; i < count; ++i )
-	{
-		cumAspect[ i ] = totalAspect;
-		totalAspect += itemAspect[ i ];
-	}
-
 	std::vector< PathDef > paths;
 	BuildPaths( paths );
 	int np = (int)paths.size();
@@ -1354,14 +988,15 @@ FFResult LogoRunner::ProcessOpenGL( ProcessOpenGLStruct* pGL )
 	float pxPerSec = sp * std::fabs( sp ) * 600.0f * ( rh / 1080.0f );
 
 	float rectU[ MAX_PATHS * 4 ], infoU[ MAX_PATHS * 4 ], motionU[ MAX_PATHS * 4 ];
-	float outerU[ MAX_PATHS * 8 ], innerU[ MAX_PATHS * 8 ];
 	for( int k = 0; k < np; ++k )
 	{
 		const PathDef& p = paths[ k ];
-		float base       = p.thick * ( scale * totalAspect + gapF * count );
-		float extra      = 0.0f;
-		bool closed      = p.type >= 2 && p.type != 6;
-		if( closed && count > 0 && base > 1.0f && mode != 3 )
+		float base       = 0.0f;
+		for( int i = 0; i < count; ++i )
+			base += std::max( 1.0f, p.thick * scale * itemAspect[ i ] ) + gapF * p.thick;
+		float extra   = 0.0f;
+		bool closed   = p.type >= 2;
+		if( closed && count > 0 && base > 0 && mode != 3 )
 		{
 			float rep = std::max( 1.0f, std::round( p.len / base ) );
 			extra     = ( p.len / rep - base ) / count;
@@ -1380,39 +1015,18 @@ FFResult LogoRunner::ProcessOpenGL( ProcessOpenGLStruct* pGL )
 					phase[ pk ] += cycle;
 			}
 		}
-		float bcx = p.cx, bcy = p.cy, bw = p.w, bh = p.h;
-		bool clip = p.clip;
-		if( p.type >= 5 )
-		{
-			float x0 = 1e9f, y0 = 1e9f, x1 = -1e9f, y1 = -1e9f;
-			for( int v = 0; v < 4; ++v )
-			{
-				x0 = std::min( x0, p.ox[ v ] ), x1 = std::max( x1, p.ox[ v ] );
-				y0 = std::min( y0, p.oy[ v ] ), y1 = std::max( y1, p.oy[ v ] );
-			}
-			bcx = ( x0 + x1 ) * 0.5f, bcy = ( y0 + y1 ) * 0.5f;
-			bw  = x1 - x0 + 4.0f, bh = y1 - y0 + 4.0f;
-			clip = true;
-		}
-		rectU[ k * 4 + 0 ]   = bcx;
-		rectU[ k * 4 + 1 ]   = bcy;
-		rectU[ k * 4 + 2 ]   = bw;
-		rectU[ k * 4 + 3 ]   = bh;
+		rectU[ k * 4 + 0 ]   = p.cx;
+		rectU[ k * 4 + 1 ]   = p.cy;
+		rectU[ k * 4 + 2 ]   = p.w;
+		rectU[ k * 4 + 3 ]   = p.h;
 		infoU[ k * 4 + 0 ]   = (float)p.type;
 		infoU[ k * 4 + 1 ]   = p.len;
 		infoU[ k * 4 + 2 ]   = p.thick;
-		infoU[ k * 4 + 3 ]   = clip ? 1.0f : 0.0f;
+		infoU[ k * 4 + 3 ]   = p.clip ? 1.0f : 0.0f;
 		motionU[ k * 4 + 0 ] = extra;
 		motionU[ k * 4 + 1 ] = p.chainOff;
 		motionU[ k * 4 + 2 ] = (float)phase[ pk ] + values[ P_OFFSET ] * cycle;
-		motionU[ k * 4 + 3 ] = cycle;
-		for( int v = 0; v < 4; ++v )
-		{
-			outerU[ k * 8 + v * 2 + 0 ] = p.ox[ v ];
-			outerU[ k * 8 + v * 2 + 1 ] = p.oy[ v ];
-			innerU[ k * 8 + v * 2 + 0 ] = p.ix[ v ];
-			innerU[ k * 8 + v * 2 + 1 ] = p.iy[ v ];
-		}
+		motionU[ k * 4 + 3 ] = 0.0f;
 	}
 
 	float tr, tg, tb, br, bg, bb;
@@ -1430,8 +1044,6 @@ FFResult LogoRunner::ProcessOpenGL( ProcessOpenGLStruct* pGL )
 		glUniform4fv( glGetUniformLocation( prog, "pRect" ), np, rectU );
 		glUniform4fv( glGetUniformLocation( prog, "pInfo" ), np, infoU );
 		glUniform4fv( glGetUniformLocation( prog, "pMotion" ), np, motionU );
-		glUniform4fv( glGetUniformLocation( prog, "pOuter" ), np * 2, outerU );
-		glUniform4fv( glGetUniformLocation( prog, "pInner" ), np * 2, innerU );
 	}
 	shader.Set( "flipSide", values[ P_FLIP ] > 0.5f ? 1 : 0 );
 	shader.Set( "count", count );
@@ -1445,31 +1057,14 @@ FFResult LogoRunner::ProcessOpenGL( ProcessOpenGLStruct* pGL )
 	if( count > 0 )
 	{
 		glUniform1fv( glGetUniformLocation( prog, "aspects" ), count, itemAspect.data() );
-		glUniform1fv( glGetUniformLocation( prog, "cumAspect" ), count, cumAspect );
 		glUniform4fv( glGetUniformLocation( prog, "rects" ), count, itemRect.data() );
 		glUniform1iv( glGetUniformLocation( prog, "isText" ), count, itemIsText.data() );
 	}
 	shader.Set( "atlas", 0 );
 
-	float pad = std::max( 2.0f, values[ P_BORDER_WIDTH ] * 16.0f * k + values[ P_GLOW ] * 30.0f * k * 4.0f );
-	BuildGeometry( paths, pad, rw, rh );
-
-
 	ScopedSamplerActivation activateSampler( 0 );
 	Scoped2DTextureBinding textureBinding( atlasTex );
-	if( !verts.empty() )
-	{
-		GLboolean blendWas = glIsEnabled( GL_BLEND );
-		if( blendWas )
-			glDisable( GL_BLEND );
-		ScopedVAOBinding vaoBinding( vao );
-		glBindBuffer( GL_ARRAY_BUFFER, vbo );
-		glBufferData( GL_ARRAY_BUFFER, verts.size() * sizeof( float ), verts.data(), GL_STREAM_DRAW );
-		glDrawArrays( GL_TRIANGLES, 0, (GLsizei)( verts.size() / 3 ) );
-		glBindBuffer( GL_ARRAY_BUFFER, 0 );
-		if( blendWas )
-			glEnable( GL_BLEND );
-	}
+	quad.Draw();
 	return FF_SUCCESS;
 }
 
@@ -1575,9 +1170,6 @@ char* LogoRunner::GetParameterDisplay( unsigned int index )
 			snprintf( displayBuf, sizeof( displayBuf ), "%d: %s", sel, slices[ sel - 1 ].name.c_str() );
 		return displayBuf;
 	}
-	case P_SLICE_MARGIN:
-		snprintf( displayBuf, sizeof( displayBuf ), "%+d px", (int)std::lround( ( v - 0.2f ) * 100.0f * ( rh / 1080.0f ) ) );
-		return displayBuf;
 	case P_SPEED:
 	{
 		float sp = ( v - 0.5f ) * 2.0f;
