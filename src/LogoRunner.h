@@ -115,8 +115,11 @@ private:
 	std::vector< float > itemRect;// x,y,w,h in atlas uv
 	GLuint atlasTex = 0;
 
+	void BuildGeometry( const std::vector< PathDef >& paths, float pad, float rw, float rh );
+
 	ffglex::FFGLShader shader;
-	ffglex::FFGLScreenQuad quad;
+	GLuint vao = 0, vbo = 0;
+	std::vector< float > verts;// x, y, pathIndex
 
 	std::string sliceFile;          // user chosen, empty = auto
 	std::string loadedSliceFile;

@@ -24,7 +24,7 @@ static CFFGLPluginInfo PluginInfo(
 	2,                   // API major version number
 	1,                   // API minor version number
 	1,                   // Plugin major version number
-	4,                   // Plugin minor version number
+	5,                   // Plugin minor version number
 	FF_SOURCE,           // Plugin type
 	"Chay logo PNG va chu theo duong ngang, doc, tron, elip, vien chu nhat",
 	"QM LED" );
@@ -35,20 +35,24 @@ static const int MAX_W   = 4096;
 static const float PI_F  = 3.14159265358979f;
 
 static const char vertexShaderCode[] = R"(#version 410 core
-layout( location = 0 ) in vec4 vPosition;
-layout( location = 1 ) in vec2 vUV;
-out vec2 uv;
+layout( location = 0 ) in vec2 aPos; // pixels, y up
+layout( location = 1 ) in float aPath;
+uniform vec2 res;
+out vec2 vPix;
+flat out int vPath;
 void main()
 {
-	gl_Position = vPosition;
-	uv = vUV;
+	vPix  = aPos;
+	vPath = int( floor( aPath + 0.5 ) );
+	gl_Position = vec4( aPos / res * 2.0 - 1.0, 0.0, 1.0 );
 }
 )";
 
 static const char fragmentShaderCode[] = R"(#version 410 core
 #define MAXI 16
 #define MAXP 16
-in vec2 uv;
+in vec2 vPix;
+flat in int vPath;
 out vec4 fragColor;
 
 uniform vec2 res;
@@ -113,12 +117,16 @@ vec4 over( vec4 top, vec4 bottom ) { return top + bottom * ( 1.0 - top.a ); }
 
 void main()
 {
-	vec2 p   = uv * res;
+	if( vPath < 0 )
+	{
+		fragColor = vec4( 0.0 );
+		return;
+	}
+	vec2 p   = vPix;
 	vec4 col = vec4( 0.0 );
 
-	for( int k = 0; k < MAXP; ++k )
 	{
-		if( k >= pathCount ) break;
+		int k  = vPath;
 		vec4 R = pRect[ k ];
 		vec4 I = pInfo[ k ];
 		vec4 M = pMotion[ k ];
@@ -128,8 +136,7 @@ void main()
 		vec2 center = R.xy;
 		vec2 size   = R.zw;
 		vec2 d      = p - center;
-		if( I.w > 0.5 && ( abs( d.x ) > size.x * 0.5 || abs( d.y ) > size.y * 0.5 ) )
-			continue;
+
 
 		float s = 0.0, n = 0.0, nb = -1e9;
 		bool along = true;
@@ -222,7 +229,10 @@ void main()
 				cum += eL;
 			}
 			if( !hit )
-				continue;
+			{
+				fragColor = vec4( 0.0 );
+				return;
+			}
 			nb = n;
 		}
 		else
@@ -234,7 +244,10 @@ void main()
 			vec2 D = corner( pOuter, k, 3 );
 			vec2 uv2 = invBilinear( p, A, B, C, D );
 			if( uv2.x < 0.0 || uv2.x > 1.0 || uv2.y < 0.0 || uv2.y > 1.0 )
-				continue;
+			{
+				fragColor = vec4( 0.0 );
+				return;
+			}
 			s = uv2.x * L;
 			float across = distance( A, D );
 			n  = ( uv2.y - 0.5 ) * across / max( thick, 1.0 ) + 0.5;
@@ -249,7 +262,10 @@ void main()
 			s  = L - s;
 		}
 		if( !along )
-			continue;
+		{
+			fragColor = vec4( 0.0 );
+			return;
+		}
 
 		vec4 c = vec4( 0.0 );
 		bool inBand = nb >= 0.0 && nb <= 1.0;
@@ -415,10 +431,16 @@ FFResult LogoRunner::InitGL( const FFGLViewportStruct* vp )
 		DeInitGL();
 		return FF_FAIL;
 	}
-	if( !quad.Initialise() )
+	glGenVertexArrays( 1, &vao );
+	glGenBuffers( 1, &vbo );
 	{
-		DeInitGL();
-		return FF_FAIL;
+		ScopedVAOBinding vaoBinding( vao );
+		glBindBuffer( GL_ARRAY_BUFFER, vbo );
+		glEnableVertexAttribArray( 0 );
+		glVertexAttribPointer( 0, 2, GL_FLOAT, GL_FALSE, 3 * sizeof( float ), (void*)0 );
+		glEnableVertexAttribArray( 1 );
+		glVertexAttribPointer( 1, 1, GL_FLOAT, GL_FALSE, 3 * sizeof( float ), (void*)( 2 * sizeof( float ) ) );
+		glBindBuffer( GL_ARRAY_BUFFER, 0 );
 	}
 	contentDirty = true;
 	hasLastTime  = false;
@@ -428,7 +450,8 @@ FFResult LogoRunner::InitGL( const FFGLViewportStruct* vp )
 FFResult LogoRunner::DeInitGL()
 {
 	shader.FreeGLResources();
-	quad.Release();
+	if( vbo ) { glDeleteBuffers( 1, &vbo ); vbo = 0; }
+	if( vao ) { glDeleteVertexArrays( 1, &vao ); vao = 0; }
 	if( atlasTex )
 	{
 		glDeleteTextures( 1, &atlasTex );
@@ -1189,6 +1212,109 @@ void LogoRunner::BuildPaths( std::vector< PathDef >& out ) const
 	}
 }
 
+// Build only the triangles the band actually covers, so the GPU never shades
+// the empty parts of the frame.
+void LogoRunner::BuildGeometry( const std::vector< PathDef >& paths, float pad, float rw, float rh )
+{
+	verts.clear();
+	auto pushTri = [ & ]( float ax, float ay, float bx, float by, float cx, float cy, float idx ) {
+		verts.push_back( ax ); verts.push_back( ay ); verts.push_back( idx );
+		verts.push_back( bx ); verts.push_back( by ); verts.push_back( idx );
+		verts.push_back( cx ); verts.push_back( cy ); verts.push_back( idx );
+	};
+	auto pushQuad = [ & ]( const float* qx, const float* qy, float idx ) {
+		pushTri( qx[ 0 ], qy[ 0 ], qx[ 1 ], qy[ 1 ], qx[ 2 ], qy[ 2 ], idx );
+		pushTri( qx[ 0 ], qy[ 0 ], qx[ 2 ], qy[ 2 ], qx[ 3 ], qy[ 3 ], idx );
+	};
+	auto pushRing = [ & ]( const float* ox, const float* oy, const float* ix, const float* iy, float idx ) {
+		for( int e = 0; e < 4; ++e )
+		{
+			int f = ( e + 1 ) & 3;
+			pushTri( ox[ e ], oy[ e ], ox[ f ], oy[ f ], ix[ f ], iy[ f ], idx );
+			pushTri( ox[ e ], oy[ e ], ix[ f ], iy[ f ], ix[ e ], iy[ e ], idx );
+		}
+	};
+
+	// full frame pass that writes transparent, so nothing from the host shows through
+	{
+		float qx[ 4 ] = { 0, rw, rw, 0 };
+		float qy[ 4 ] = { 0, 0, rh, rh };
+		pushQuad( qx, qy, -1.0f );
+	}
+
+	for( size_t k = 0; k < paths.size(); ++k )
+	{
+		const PathDef& p = paths[ k ];
+		float idx        = (float)k;
+		float hw         = p.thick * 0.5f + pad;
+
+		if( p.type == 5 )
+		{
+			float ox[ 4 ], oy[ 4 ], ix[ 4 ], iy[ 4 ];
+			OffsetQuad( p.ox, p.oy, -pad, ox, oy );
+			OffsetQuad( p.ox, p.oy, p.thick + pad, ix, iy );
+			pushRing( ox, oy, ix, iy, idx );
+		}
+		else if( p.type == 6 )
+		{
+			float across = std::sqrt( ( p.ox[ 0 ] - p.ox[ 3 ] ) * ( p.ox[ 0 ] - p.ox[ 3 ] ) + ( p.oy[ 0 ] - p.oy[ 3 ] ) * ( p.oy[ 0 ] - p.oy[ 3 ] ) );
+			float half   = std::min( 0.5f, hw / std::max( across, 1.0f ) );
+			float v0 = 0.5f - half, v1 = 0.5f + half;
+			auto bilerp = [ & ]( float u, float v, float& x, float& y ) {
+				float tx = p.ox[ 0 ] + ( p.ox[ 1 ] - p.ox[ 0 ] ) * u;
+				float ty = p.oy[ 0 ] + ( p.oy[ 1 ] - p.oy[ 0 ] ) * u;
+				float bx = p.ox[ 3 ] + ( p.ox[ 2 ] - p.ox[ 3 ] ) * u;
+				float by = p.oy[ 3 ] + ( p.oy[ 2 ] - p.oy[ 3 ] ) * u;
+				x = tx + ( bx - tx ) * v;
+				y = ty + ( by - ty ) * v;
+			};
+			float qx[ 4 ], qy[ 4 ];
+			bilerp( 0, v0, qx[ 0 ], qy[ 0 ] );
+			bilerp( 1, v0, qx[ 1 ], qy[ 1 ] );
+			bilerp( 1, v1, qx[ 2 ], qy[ 2 ] );
+			bilerp( 0, v1, qx[ 3 ], qy[ 3 ] );
+			pushQuad( qx, qy, idx );
+		}
+		else if( p.type == 0 || p.type == 1 )
+		{
+			float halfW = p.type == 0 ? p.w * 0.5f : hw;
+			float halfH = p.type == 0 ? hw : p.h * 0.5f;
+			float qx[ 4 ] = { p.cx - halfW, p.cx + halfW, p.cx + halfW, p.cx - halfW };
+			float qy[ 4 ] = { p.cy - halfH, p.cy - halfH, p.cy + halfH, p.cy + halfH };
+			pushQuad( qx, qy, idx );
+		}
+		else if( p.type == 2 || p.type == 3 )
+		{
+			float rx = p.type == 2 ? p.h * 0.5f - p.thick * 0.5f : p.w * 0.5f - p.thick * 0.5f;
+			float ry = p.h * 0.5f - p.thick * 0.5f;
+			rx       = std::max( rx, 1.0f );
+			ry       = std::max( ry, 1.0f );
+			const int N = 72;
+			for( int i = 0; i < N; ++i )
+			{
+				float a0 = 2.0f * PI_F * i / N, a1 = 2.0f * PI_F * ( i + 1 ) / N;
+				float c0 = std::cos( a0 ), s0 = std::sin( a0 ), c1 = std::cos( a1 ), s1 = std::sin( a1 );
+				float o0x = p.cx + ( rx + hw ) * c0, o0y = p.cy + ( ry + hw ) * s0;
+				float o1x = p.cx + ( rx + hw ) * c1, o1y = p.cy + ( ry + hw ) * s1;
+				float i0x = p.cx + std::max( rx - hw, 0.0f ) * c0, i0y = p.cy + std::max( ry - hw, 0.0f ) * s0;
+				float i1x = p.cx + std::max( rx - hw, 0.0f ) * c1, i1y = p.cy + std::max( ry - hw, 0.0f ) * s1;
+				pushTri( o0x, o0y, o1x, o1y, i1x, i1y, idx );
+				pushTri( o0x, o0y, i1x, i1y, i0x, i0y, idx );
+			}
+		}
+		else
+		{
+			float ow = p.w * 0.5f + pad, oh = p.h * 0.5f + pad;
+			float iw = std::max( 0.0f, p.w * 0.5f - p.thick - pad ), ih = std::max( 0.0f, p.h * 0.5f - p.thick - pad );
+			float ox[ 4 ] = { p.cx - ow, p.cx + ow, p.cx + ow, p.cx - ow };
+			float oy[ 4 ] = { p.cy - oh, p.cy - oh, p.cy + oh, p.cy + oh };
+			float ix[ 4 ] = { p.cx - iw, p.cx + iw, p.cx + iw, p.cx - iw };
+			float iy[ 4 ] = { p.cy - ih, p.cy - ih, p.cy + ih, p.cy + ih };
+			pushRing( ox, oy, ix, iy, idx );
+		}
+	}
+}
+
 static void HsvToRgb( float h, float s, float v, float& r, float& g, float& b )
 {
 	if( h >= 1.0f )
@@ -1331,9 +1457,24 @@ FFResult LogoRunner::ProcessOpenGL( ProcessOpenGLStruct* pGL )
 	}
 	shader.Set( "atlas", 0 );
 
+	float pad = std::max( 2.0f, values[ P_BORDER_WIDTH ] * 16.0f * k + values[ P_GLOW ] * 30.0f * k * 4.0f );
+	BuildGeometry( paths, pad, rw, rh );
+
 	ScopedSamplerActivation activateSampler( 0 );
 	Scoped2DTextureBinding textureBinding( atlasTex );
-	quad.Draw();
+	if( !verts.empty() )
+	{
+		GLboolean blendWas = glIsEnabled( GL_BLEND );
+		if( blendWas )
+			glDisable( GL_BLEND );
+		ScopedVAOBinding vaoBinding( vao );
+		glBindBuffer( GL_ARRAY_BUFFER, vbo );
+		glBufferData( GL_ARRAY_BUFFER, verts.size() * sizeof( float ), verts.data(), GL_STREAM_DRAW );
+		glDrawArrays( GL_TRIANGLES, 0, (GLsizei)( verts.size() / 3 ) );
+		glBindBuffer( GL_ARRAY_BUFFER, 0 );
+		if( blendWas )
+			glEnable( GL_BLEND );
+	}
 	return FF_SUCCESS;
 }
 
